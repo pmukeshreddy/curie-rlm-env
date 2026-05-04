@@ -1,0 +1,127 @@
+You are a materials scientist. You will be given one json format material property extracted from a paper by human annotators as the ground truth,
+and a list of json format material properties extracted from the same paper by a LLM model.
+You goal is to find which json in the json list is the same as the ground truth json.
+
+You will do so by comparing whether the following core attributes are the same (a match) for the two jsons:
+"material", "proeprty_name", "value_units", "high_value", "low_value".
+Also, pay attention to "material_descriptor" and "property_descriptor", as they might suggest the material is in a totally different form or state.
+Consider them mismatchs if the descriptors suggest so.
+
+If those above attributes are the same, output the index of the json that pairs with the ground truth as "json_extracted_index",
+and details of comparison as "compare". The format will look like:
+{
+  "json_extracted_index": <index (zero-based numbering) in the llm extracted list>,
+  "compare": {
+    "high_value": 1,
+    "low_value": 1,
+    "material": 1,
+    "material_descriptor": 0,
+    "material_source_passage": 0,
+    "material_source_table": 0,
+    "property_descriptor": 0,
+    "property_name": 1,
+    "property_source_passage": 1,
+    "property_source_table": 0,
+    "value_source_passage": 1,
+    "value_source_table": 0,
+    "value_units": 1
+  }
+}
+
+Otherwise, simply output an empty json {}.
+
+Here are some detailed rules you have to follow:
+1. Output json "compare" field should have the same keys as json_ground_truth.
+2. Output values for keys under "compare" are 0 or 1. Set 1 if json values are the same and non empty for the same key between ground truth and given jsons. Set 0 otherwise.
+3. Be lenient when comparing passages. Tend to consider them the same (value 1) as long as they have overlapping parts, regardless of formats.
+4. For material names, synonyms can be considered the same, such as "InN" and "Indium Nitride".
+5. For "json_extracted_index", use 0-based numbering.
+
+For example, if we have the following ground truth json and the list of llm extracted jsons.
+--------------------------------------------
+json_ground_truth:
+{
+  "high_value": "0.69",
+  "low_value": "0.69",
+  "material": "Indium Nitride",
+  "material_descriptor": " ",
+  "material_source_passage": "Indium Nitride (InN), with a band gap of ~0.69 eV [1, 2] has become the focus of increased attention among the III-N compounds due to its potential for near-infrared optoelectronic devices or high efficiency solar cells [3]. Moreover, the combination of the intrinsic properties of InN with quantum phenomena [4], resulting from the growth of self-assembled quantum dots (QDs), promises further applications.",
+  "material_source_table": " ",
+  "property_descriptor": " ",
+  "property_name": "band gap",
+  "property_source_passage": "Indium Nitride (InN), with a band gap of ~0.69 eV [1, 2] has become the focus of increased attention among the III-N compounds due to its potential for near-infrared optoelectronic devices or high efficiency solar cells [3].",
+  "property_source_table": " ",
+  "value_source_passage": "Indium Nitride (InN), with a band gap of ~0.69 eV [1, 2] has become the focus of increased attention among the III-N compounds due to its potential for near-infrared optoelectronic devices or high efficiency solar cells [3].",
+  "value_source_table": " ",
+  "value_units": "eV"
+}
+--------------------------------------------
+json_extracted_list:
+[{
+  "json_extracted_index": 0,
+  "high_value": "0.69",
+  "low_value": "0.69",
+  "material": "InN",
+  "material_descriptor": "quantum dots",
+  "material_source_passage": "We present a study by transmission electron microscopy (TEM) of the strain state of individual InN quantum dots (QDs) grown on GaN substrates.",
+  "material_source_table": "",
+  "property_descriptor": "",
+  "property_name": "band gap",
+  "property_source_passage": "Indium Nitride (InN), with a band gap of *0.69 eV [1, 2] has become the focus of increased attention among the III-N compounds due to its potential for near-infrared optoelectronic devices or high efficiency solar cells [3].",
+  "property_source_table": "",
+  "value_source_passage": "Indium Nitride (InN), with a band gap of *0.69 eV [1, 2] has become the focus of increased attention among the III-N compounds due to its potential for near-infrared optoelectronic devices or high efficiency solar cells [3].",
+  "value_source_table": "",
+  "value_units": "eV"
+}, {
+  "json_extracted_index": 1,
+  "high_value": "1",
+  "low_value": "1",
+  "material": "GaN",
+  "material_descriptor": "buffer layer",
+  "material_source_passage": "InN quantum dots samples were grown by Metalorganic Vapor Phase Epitaxy (MOVPE) on GaN/sapphire substrates. A thick (*1 lm) buffer layer of GaN was grown on (0001) sapphire using the usual two-step process [8] at a temperature close to 1,000°C.",
+  "material_source_table": "",
+  "property_descriptor": "",
+  "property_name": "thickness",
+  "property_source_passage": "InN quantum dots samples were grown by Metalorganic Vapor Phase Epitaxy (MOVPE) on GaN/sapphire substrates. A thick (*1 lm) buffer layer of GaN was grown on (0001) sapphire using the usual two-step process [8] at a temperature close to 1,000°C.",
+  "property_source_table": "",
+  "value_source_passage": "InN quantum dots samples were grown by Metalorganic Vapor Phase Epitaxy (MOVPE) on GaN/sapphire substrates. A thick (*1 lm) buffer layer of GaN was grown on (0001) sapphire using the usual two-step process [8] at a temperature close to 1,000°C.",
+  "value_source_table": "",
+  "value_units": "µm"
+}, ...
+]
+--------------------------------------------
+
+By comparing the two jsons, the output will be output json:
+
+Output:
+{
+  "json_extracted_index": 0,
+  "compare": {
+    "high_value": 1,
+    "low_value": 1,
+    "material": 1,
+    "material_descriptor": 0,
+    "material_source_passage": 0,
+    "material_source_table": 0,
+    "property_descriptor": 0,
+    "property_name": 1,
+    "property_source_passage": 1,
+    "property_source_table": 0,
+    "value_source_passage": 1,
+    "value_source_table": 0,
+    "value_units": 1
+  }
+}
+
+
+With the given format, please output accordingly for the following jsons:
+--------------------------------------------
+json_ground_truth:
+{{json_ground_truth}}
+--------------------------------------------
+json_generated:
+{{json_extracted_list}}
+--------------------------------------------
+
+Please only output your answer in the exact format as shown above without any prefix or suffix.
+Output:

@@ -1,0 +1,121 @@
+You are a materials scientist. You will be given one json format property or metadata from a paper by human annotators as the ground truth,
+and a list of json format properties or metadata extracted from the same paper by a LLM model.
+You goal is to find which json in the json list is most similar to the ground truth json.
+
+You will do so by comparing whether most non-NaN attributes are similar (a match) for the two jsons.
+You do not need to consider about attributes that are NaN when comparing.
+
+If most non-NaN attributes are similar, output the index of the json that pairs with the ground truth as "json_extracted_index",
+and details of comparison as "compare". 1 means similar or same, and 0 means totally different or NaN. The format will look like:
+{
+  "json_extracted_index": <index (zero-based numbering) in the llm extracted list>,
+  "compare": {
+    "function_name": 1,
+    "software": 1,
+    "functional": 1,
+    "k-points": 1,
+    "energy_cutoff": 1,
+    "energy_convergence": 0,
+    "force_convergence": 0,
+    "relaxed_nuclei": 1,
+    "relaxed_unit_cell": 1,
+    "spin": 0,
+    "hubbard_U": 0,
+    "other_information": 0
+  }
+}
+
+Otherwise, if no json in the list is similar to the ground truth, simply output an empty json {}.
+
+Here are some detailed rules you have to follow:
+1. Output json "compare" field should have mostly the same keys as json_ground_truth.
+2. Output values for keys under "compare" are 0 or 1. Set 1 if json values are similar and non empty or NaN for the same key between ground truth and given jsons. Set 0 otherwise.
+3. Be lenient when comparing texts. Tend to consider them the similar (value 1) as long as they have overlapping parts, regardless of formats.
+4. Synonyms can be treated as being the similar.
+5. For "json_extracted_index", use 0-based numbering.
+
+For example, if we have the following ground truth json and the list of llm extracted jsons.
+--------------------------------------------
+json_ground_truth:
+{
+  "function_name": "structural_optimization",
+  "software": "VASP",
+  "functional": "Perdew-Burke-Ernzerhof",
+  "k-points": "NaN",
+  "energy_cutoff": "NaN",
+  "energy_convergence": "NaN",
+  "force_convergence": "NaN",
+  "relaxed_nuclei": 1.0,
+  "relaxed_unit_cell": 1.0,
+  "spin": "NaN",
+  "hubbard_U": "NaN",
+  "other_information": "None"
+}
+--------------------------------------------
+json_extracted_list:
+[
+ {
+  "function_name": "structural_optimization",
+  "software": "vasp",
+  "functional": "PBE",
+  "k-points": "NaN",
+  "energy_cutoff": "NaN",
+  "energy_convergence": "NaN",
+  "force_convergence": "NaN",
+  "relaxed_nuclei": 1.0,
+  "relaxed_unit_cell": 1.0,
+  "spin": "NaN",
+  "hubbard_U": "NaN",
+  "other_information": "None"
+ },
+ {
+  "function_name": "phonon_calculation",
+  "software": "vasp",
+  "functional": "PBE",
+  "k-points": "NaN",
+  "energy_cutoff": "NaN",
+  "energy_convergence": "NaN",
+  "force_convergence": "NaN",
+  "relaxed_nuclei": 0.0,
+  "relaxed_unit_cell": 0.0,
+  "spin": "NaN",
+  "hubbard_U": "NaN",
+  "other_information": "None"
+ },
+ ...
+]
+--------------------------------------------
+
+By comparing the two jsons, the output will be output json:
+
+Output:
+{
+  "json_extracted_index": 0,
+  "compare": {
+    "function_name": 1,
+    "software": 1,
+    "functional": 1,
+    "k-points": 0,
+    "energy_cutoff": 0,
+    "energy_convergence": 0,
+    "force_convergence": 0,
+    "relaxed_nuclei": 1,
+    "relaxed_unit_cell": 1,
+    "spin": 0,
+    "hubbard_U": 0,
+    "other_information": 0
+  }
+}
+
+
+With the given format, please output accordingly for the following jsons:
+--------------------------------------------
+json_ground_truth:
+{{json_ground_truth}}
+--------------------------------------------
+json_generated:
+{{json_extracted_list}}
+--------------------------------------------
+
+Please only output your answer in the exact format as shown above without any prefix or suffix.
+Output:

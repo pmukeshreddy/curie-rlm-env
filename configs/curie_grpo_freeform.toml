@@ -1,0 +1,74 @@
+# Stage 5b — Phase 1: free-form RL training (DPPO+KL with DR-GRPO advantages).
+#
+# Tasks: DFT-C, HFE, HFD, QECC_65, GEO. Programmatic rewards only
+# (ROUGE-L + BERTScore). No LLMSim → no Gemini calls → no judge bottleneck.
+#
+# max_steps placeholder; tune from results/probe_timings.json after running
+# scripts/probe_rollout_timing.py on the pod.
+
+max_steps = 100
+seq_len = 16384  # Curie inputs avg 15k words; +headroom for completion
+
+[deployment]
+# TUNE PER POD AVAILABILITY — Stage 5a "no GPU assumptions"
+# num_train_gpus = 2
+# num_infer_gpus = 6
+
+[wandb]
+project = "curie-rlm"
+name = "phase1_freeform_qwen3_5_7b"
+
+[ckpt]
+interval = 25
+keep_last = 3
+
+[model]
+name = "Qwen/Qwen3.5-7B-Instruct"
+ac = true  # activation checkpointing — Stage 5a §11 OOM mitigation for 15k-token inputs
+
+[orchestrator]
+batch_size = 64
+rollouts_per_example = 16
+
+# Per Stage 5a §5 — verifiers/utils/env_utils.py:14 maps id="curie-rlm-env"
+# (with hyphens) to module name "curie_rlm_env" (with underscores).
+[[orchestrator.train.env]]
+id = "curie-rlm-env"
+name = "DFT-C"
+args = { task_id = "DFT-C", split = "train" }
+
+[[orchestrator.train.env]]
+id = "curie-rlm-env"
+name = "HFE"
+args = { task_id = "HFE", split = "train" }
+
+[[orchestrator.train.env]]
+id = "curie-rlm-env"
+name = "HFD"
+args = { task_id = "HFD", split = "train" }
+
+[[orchestrator.train.env]]
+id = "curie-rlm-env"
+name = "QECC_65"
+args = { task_id = "QECC_65", split = "train" }
+
+[[orchestrator.train.env]]
+id = "curie-rlm-env"
+name = "GEO"
+args = { task_id = "GEO", split = "train" }
+
+[orchestrator.train.sampling]
+max_completion_tokens = 4096
+
+[trainer]
+# prime-rl defaults (DPPO+KL with DR-GRPO advantages):
+#   kl_tau, dppo_mask_high, dppo_mask_low, adv_tau
+# (NOT classical kl_coef, clip_range, beta — see CLAUDE.md "Algorithm naming")
+# Override here only with cause; comment any deviation.
+
+[trainer.optim]
+lr = 1e-6  # conservative for 7B + small data; tune up if reward gradient flat
+
+[inference.parallel]
+# TUNE PER POD AVAILABILITY
+# dp = 6

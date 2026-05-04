@@ -1,0 +1,48 @@
+# Stage 5b — Phase 3: geometric/structural RL training (DPPO+KL with DR-GRPO).
+#
+# Tasks: BIOGR (IoU), PDB (ID_r). Programmatic rewards only — no LLMSim,
+# no Gemini calls, full rollouts_per_example=16 like Phase 1.
+
+max_steps = 100
+seq_len = 16384
+
+[deployment]
+# TUNE PER POD AVAILABILITY
+
+[wandb]
+project = "curie-rlm"
+name = "phase3_geometric_qwen3_5_7b"
+
+[ckpt]
+interval = 25
+keep_last = 3
+
+[model]
+name = "Qwen/Qwen3.5-7B-Instruct"  # OVERRIDDEN at CLI to phase2 ckpt path
+ac = true
+
+[orchestrator]
+batch_size = 64
+rollouts_per_example = 16
+
+[[orchestrator.train.env]]
+id = "curie-rlm-env"
+name = "BIOGR"
+args = { task_id = "BIOGR", split = "train" }
+
+[[orchestrator.train.env]]
+id = "curie-rlm-env"
+name = "PDB"
+args = { task_id = "PDB", split = "train" }
+
+[orchestrator.train.sampling]
+max_completion_tokens = 4096
+
+[trainer]
+# prime-rl defaults: kl_tau, dppo_mask_high, dppo_mask_low, adv_tau
+
+[trainer.optim]
+lr = 1e-6
+
+[inference.parallel]
+# TUNE PER POD AVAILABILITY

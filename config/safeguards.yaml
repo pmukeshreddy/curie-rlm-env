@@ -1,0 +1,44 @@
+# Stage 0 — Locked Safeguards (never weaken)
+rlm_env:
+  sub_llm_max_turns: 1                         # renamed from max_recursive_depth; anchors rlm_env.py:2346+2403
+  sub_max_completion_tokens: 8192              # renamed from per_step_token_budget; value preserved per C1; anchors rlm_env.py:2347+2404
+
+sandbox:
+  sandbox_timeout_minutes: 1                   # renamed from timeout_seconds (60s → 1min); anchors rlm_env.py:2372+2458
+  sandbox_memory_gb: 4                         # renamed from memory_limit_mb (4096 MB → 4 GB); anchors rlm_env.py:2369+2455
+  code_execution_timeout: 120                  # new key; anchors rlm_env.py:2364+2415
+  abort_on_code_timeout: true                  # new key; anchors rlm_env.py:2365+2416
+
+rubric:
+  priority: "deterministic"
+  deterministic_weight: 1.0
+  llm_sim_weight: 0.7
+  freeform_weight: 0.5                     # renamed from lm_score_weight (Stage 3b: LMScore replaced by BERTScore in dispatcher); anchors free-form ROUGE+BERT 0.5+0.5 split
+  freeze_judge: true
+  judge_model_family: "gemini-2.5-pro"     # locked judge per config/judge.yaml; different family from Qwen (Alibaba)
+  length_penalty: true
+  programmatic_spot_check: true
+
+data:
+  strict_splits: true
+  zero_leakage: true
+  train_val_test_ratio: [0.7, 0.15, 0.15]      # applies to Stage 4 SFT only; NOT used for CURIE eval
+  # CURIE benchmark is eval-only per data/curie/README.md.
+  # Only split="test" is supported in CurieRLMEnv / load_curie_task.
+  # train_val_test_ratio above governs Stage 4 SFT dataset splits, not CURIE eval data.
+
+model:
+  policy_model: "Qwen3.5-7B"
+  # force_ready_flag removed (M5): zero consumers in repo; only reference was this file.
+  # answer_dict_must_contain removed (M5): zero consumers in repo; only reference was this file.
+  # Upstream contract (rlm_env.py:3804-3805) sets state["final_answer"] directly from answer["content"];
+  # no application-layer key enforcement is needed or correct.
+
+# Locked per CLAUDE.md "Reward Hacking Guards" section. NEVER weaken or override.
+# Each value is sourced verbatim from CLAUDE.md lines 31-39.
+reward_hacking_guards:
+  llmsim_spot_check_tolerance: 0.05            # CLAUDE.md L32: "numeric tolerance <5%"
+  length_penalty_ref_words_approx: 954         # CLAUDE.md L33: "~954 words" — soft reference, not hard cutoff
+  sanity_batch_interval_steps: 100             # CLAUDE.md L35: "every ~100 GRPO steps"
+  sanity_batch_rollout_count: 5                # CLAUDE.md L35: "log 5 random rollouts"
+  frozen_prompts_dir: "config/frozen_prompts"  # structural pointer; presence of populated dir is the lock

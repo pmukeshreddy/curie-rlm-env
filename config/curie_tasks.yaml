@@ -1,0 +1,54 @@
+# 10 tasks / 580 problems — Google CURIE scientific long-context benchmark.
+# DO NOT add tasks. DO NOT remove tasks.
+# Source: CLAUDE.md lines 22-25 (9 tasks named verbatim) + user-confirmed 10th task DFT-C.
+# Per-task metric routing must match config/rubric_dispatcher.yaml exactly.
+# Stage 3b: DFT-C family moved retrieval→freeform (Curie release scores DFT-C
+# with ROUGE+BERT, not LLMSim — see config/rubric_dispatcher.yaml header).
+
+tasks:
+  - id: "DFT-S"
+    family: "retrieval"
+    metric: "llmsim"
+    weight: 0.7
+  - id: "DFT-P"
+    family: "retrieval"
+    metric: "llmsim"
+    weight: 0.7
+  - id: "DFT-C"
+    family: "freeform"
+    metrics: ["rouge_l", "bert_score"]
+    weights: [0.5, 0.5]
+  - id: "MPVE"
+    family: "retrieval"
+    metric: "llmsim"
+    weight: 0.7
+  - id: "BIOGR"
+    family: "geometric"
+    metric: "iou"
+    weight: 1.0
+  - id: "PDB"
+    family: "structural"
+    metric: "id_r"
+    weight: 1.0
+  - id: "HFE"
+    family: "freeform"
+    metrics: ["rouge_l", "bert_score"]
+    weights: [0.5, 0.5]
+  - id: "HFD"
+    family: "freeform"
+    metrics: ["rouge_l", "bert_score"]
+    weights: [0.5, 0.5]
+  - id: "QECC_65"
+    family: "freeform"
+    metrics: ["rouge_l", "bert_score"]
+    weights: [0.5, 0.5]
+  - id: "GEO"
+    family: "freeform"
+    metrics: ["rouge_l", "bert_score"]
+    weights: [0.5, 0.5]
+
+task_count: 10
+problem_count: 578  # 430 source records + DFT counted 3x (DFT-S/P/C).
+                    # Paper Figure 5 reports 580; off-by-2 vs the data
+                    # dump in data/curie/ as of 2026-05-03. Do not "fix"
+                    # to 580 without locating the missing 2 records.

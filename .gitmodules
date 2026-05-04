@@ -1,0 +1,3 @@
+[submodule "data/curie"]
+	path = data/curie
+	url = https://github.com/google/curie.git

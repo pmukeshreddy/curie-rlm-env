@@ -1,0 +1,48 @@
+# Per-task Rubric dispatcher — locked per CLAUDE.md lines 22-25 verbatim.
+# Routes each Curie task to its scoring metric and weight.
+# Reward weights mirror config/safeguards.yaml `rubric` section
+# (deterministic_weight=1.0, llm_sim_weight=0.7, freeform_weight=0.5).
+# DO NOT add tasks. DO NOT change metrics. DO NOT alter weights.
+#
+# Stage 3b updates (locked):
+#  * DFT-C moved retrieval → freeform per Curie release (cell 30 has no LLMSim
+#    entry for write_code_for_paper_0_shot; falls under _SHARED_METRCS only).
+#  * LLMSim submetric label "mAP/recall/F1" → "precision/recall/F1" (Curie
+#    cell 18 returns precision/recall/F1, never mAP).
+#  * Free-form scorers: rouge_l + bert_score (was rouge_l + lm_score). LMScore
+#    is paper-only — Curie's released code uses BERTScore. See CLAUDE.md
+#    "Documented Deviations from Curie".
+#  * Free-form weights: 0.5 + 0.5 (was 1.0 + 0.5). Sum = 1.0 = parity with
+#    single-programmatic tasks.
+
+retrieval_tasks:
+  ids: ["DFT-S", "DFT-P", "MPVE"]
+  metric: "llmsim"
+  submetrics: ["precision", "recall", "F1"]
+  weight: 0.7                                  # llm_sim_weight from safeguards.yaml
+
+geometric_tasks:
+  ids: ["BIOGR"]
+  metric: "iou"                                # Intersection-over-Union (programmatic)
+  weight: 1.0                                  # deterministic_weight from safeguards.yaml
+
+structural_tasks:
+  ids: ["PDB"]
+  metric: "id_r"                               # Identity ratio from Biopython local alignment
+  weight: 1.0                                  # deterministic_weight from safeguards.yaml
+
+freeform_tasks:
+  ids: ["DFT-C", "HFE", "HFD", "QECC_65", "GEO"]
+  metrics:
+    rouge_l:
+      weight: 0.5                              # ROUGE-Lsum/100 (Curie cell 22)
+    bert_score:
+      weight: 0.5                              # BERT F1, lang="en" (Curie cell 20)
+
+# CLAUDE.md L28: "Optional: pass@k (threshold-based, e.g. F1>0.5 for retrieval, ROUGE-L>0.3 for free-form)."
+pass_at_k_thresholds:
+  retrieval_f1: 0.5
+  freeform_rouge_l: 0.3
+
+# CLAUDE.md L27 / README L29: "per-task normalized score → average across all 10 tasks (matches Figure 5)"
+headline_metric: "per_task_normalized_then_average_10"

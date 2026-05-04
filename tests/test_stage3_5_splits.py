@@ -1,0 +1,137 @@
+"""Stage 3.5 — Stratified split tests.
+
+Tests do NOT touch real data/curie/splits/ files; they use tmp_path or
+synthetic record dicts as inputs to the pure functions. The actual splits
+files are built by scripts/build_splits.py.
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from curie_rlm_env.splits import (
+    DEFAULT_RATIOS,
+    LOCKED_SEED,
+    build_records_per_task,
+    stratified_split,
+    write_splits,
+)
+from curie_rlm_env.baseline_eval import TASK_IDS
+
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_DATA_ROOT = _PROJECT_ROOT / "data" / "curie" / "data" / "data"
+
+
+def _mk_records(task_id: str, ids: list[str]) -> list[dict]:
+    """Build synthetic per-task record list (test-fixture inputs to pure split fn)."""
+    return [
+        {"task_id": task_id, "record_id": rid, "input": f"x_{rid}", "ground_truth": {"r": rid}}
+        for rid in ids
+    ]
+
+
+def test_stratified_no_global_split():
+    # Each task gets its own train/val/test independent of others' sizes.
+    records_per_task = {
+        "BIGTASK": _mk_records("BIGTASK", [f"b{i}" for i in range(100)]),
+        "TINYTASK": _mk_records("TINYTASK", [f"t{i}" for i in range(15)]),
+    }
+    splits = stratified_split(records_per_task)
+    # Per-task sizes follow the ratio independently
+    assert len(splits["BIGTASK"]["train"]) == 70
+    assert len(splits["BIGTASK"]["val"]) == 15
+    assert len(splits["BIGTASK"]["test"]) == 15
+    assert len(splits["TINYTASK"]["train"]) == 10  # int(15*0.7)
+    assert len(splits["TINYTASK"]["val"]) == 2     # int(15*0.15)
+    assert len(splits["TINYTASK"]["test"]) == 3    # 15 - 10 - 2
+
+
+def test_seed_42_deterministic(tmp_path):
+    records_per_task = {
+        "A": _mk_records("A", [f"a{i}" for i in range(20)]),
+        "B": _mk_records("B", [f"b{i}" for i in range(30)]),
+    }
+    splits1 = stratified_split(records_per_task, seed=42)
+    splits2 = stratified_split(records_per_task, seed=42)
+    assert splits1 == splits2
+
+    # File-level determinism
+    write_splits(splits1, tmp_path / "first")
+    write_splits(splits2, tmp_path / "second")
+    for split_name in ("train", "val", "test"):
+        b1 = (tmp_path / "first" / f"{split_name}.jsonl").read_bytes()
+        b2 = (tmp_path / "second" / f"{split_name}.jsonl").read_bytes()
+        assert b1 == b2, f"{split_name}.jsonl differs across two seed=42 runs"
+
+
+def test_all_10_tasks_have_train_val_test():
+    # Real Curie data: every task must have nonzero train+val+test
+    records_per_task = build_records_per_task(_DATA_ROOT)
+    splits = stratified_split(records_per_task)
+    for task_id in TASK_IDS:
+        assert len(splits[task_id]["train"]) > 0, f"{task_id} train empty"
+        assert len(splits[task_id]["val"]) > 0, f"{task_id} val empty"
+        assert len(splits[task_id]["test"]) > 0, f"{task_id} test empty"
+
+
+def test_no_record_in_two_splits():
+    # Within each task: train, val, test record_id sets are pairwise disjoint
+    records_per_task = build_records_per_task(_DATA_ROOT)
+    splits = stratified_split(records_per_task)
+    for task_id in TASK_IDS:
+        train_ids = {r["record_id"] for r in splits[task_id]["train"]}
+        val_ids = {r["record_id"] for r in splits[task_id]["val"]}
+        test_ids = {r["record_id"] for r in splits[task_id]["test"]}
+        assert train_ids.isdisjoint(val_ids), f"{task_id} train∩val nonempty"
+        assert train_ids.isdisjoint(test_ids), f"{task_id} train∩test nonempty"
+        assert val_ids.isdisjoint(test_ids), f"{task_id} val∩test nonempty"
+
+
+def test_dft_family_unification():
+    # DFT-S/P/C share record_ids → must share partition (no leakage)
+    records_per_task = build_records_per_task(_DATA_ROOT)
+    splits = stratified_split(records_per_task)
+    for split_name in ("train", "val", "test"):
+        ids_s = {r["record_id"] for r in splits["DFT-S"][split_name]}
+        ids_p = {r["record_id"] for r in splits["DFT-P"][split_name]}
+        ids_c = {r["record_id"] for r in splits["DFT-C"][split_name]}
+        assert ids_s == ids_p == ids_c, (
+            f"DFT-S/P/C must share {split_name} partition; got "
+            f"S={len(ids_s)} P={len(ids_p)} C={len(ids_c)}"
+        )
+
+
+def test_splits_files_have_expected_schema(tmp_path):
+    records_per_task = {
+        "A": _mk_records("A", [f"a{i}" for i in range(10)]),
+    }
+    splits = stratified_split(records_per_task)
+    write_splits(splits, tmp_path)
+    required = {"task_id", "record_id", "input", "ground_truth"}
+    found_lines = 0
+    for split_name in ("train", "val", "test"):
+        path = tmp_path / f"{split_name}.jsonl"
+        assert path.is_file()
+        for line in path.read_text().splitlines():
+            if not line.strip():
+                continue
+            entry = json.loads(line)
+            assert required.issubset(entry.keys()), (
+                f"{split_name}.jsonl entry missing keys: "
+                f"required={required}, got={set(entry.keys())}"
+            )
+            found_lines += 1
+    assert found_lines == 10  # all 10 records appear exactly once across the 3 files
+
+
+def test_locked_seed_is_42():
+    # Document the locked seed value in the public constant
+    assert LOCKED_SEED == 42
+
+
+def test_default_ratios_sum_to_one():
+    assert abs(sum(DEFAULT_RATIOS) - 1.0) < 1e-9
+    assert DEFAULT_RATIOS == (0.7, 0.15, 0.15)

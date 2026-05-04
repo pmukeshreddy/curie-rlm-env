@@ -1,0 +1,41 @@
+# Stage 5.5 — RFT (Rejection-sampling Fine-Tuning) bootstrap config.
+#
+# Triggered only if Stage 5 phase1 stalls. RFT'd checkpoint feeds back into
+# phase1 resume. Every demo is a real Qwen self-rollout filtered by reward
+# threshold T (default 0.5) — ZERO-SYNTHETIC compliant.
+#
+# Entrypoint: prime-rl SFT trainer (`uv run sft @ <this file>`), NOT rl trainer.
+#
+# Set --model.name CLI override to the actual stalled phase1 checkpoint path
+# at run time. The default name below is just a placeholder so the file parses.
+
+max_steps = 50
+seq_len = 16384
+
+[deployment]
+# TUNE PER POD AVAILABILITY
+
+[wandb]
+project = "curie-rlm"
+name = "stage5_5_rft_bootstrap"
+
+[ckpt]
+interval = 10
+keep_last = 2
+
+[model]
+# OVERRIDDEN at CLI to stalled phase1 checkpoint via --model.name
+name = "Qwen/Qwen3.5-7B-Instruct"
+ac = true  # activation checkpointing — Stage 5a §11 OOM mitigation
+
+[data]
+path = "outputs/rft/high_reward_rollouts.jsonl"
+format = "messages"  # per Stage 4a memo §3 — prime-rl SFT primary format
+
+[trainer.optim]
+lr = 5e-7  # lower than Stage 5b's 1e-6; SFT is more sensitive to overshoot
+
+[trainer.loss_mask]
+# Stage 4a OQ-B locked decision: train loss on assistant tokens only.
+# Verbatim from Stage 4a §3: "role-based and configurable through LossMaskConfig".
+strategy = "assistant_only"

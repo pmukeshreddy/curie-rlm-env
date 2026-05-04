@@ -1,0 +1,11 @@
+# Locked judge per CLAUDE.md Reward Hacking Guard #1:
+# "Freeze judge model (Gemini or Claude — different family from Qwen policy)."
+# Curie used gemini-1.5-pro-latest (curie_run_eval.ipynb cell 14); we lock to
+# the newer same-family model gemini-2.5-pro for paper-aligned reproducibility.
+# NEVER swap, downgrade, or fall back — identity is the freeze.
+
+judge_model_id: "gemini-2.5-pro"                # locked judge
+judge_family: "google"                           # different family from Qwen (Alibaba) policy
+temperature: 0.0                                 # deterministic judging — no sampling variance
+max_tokens: 1024
+prompt_source: "config/frozen_prompts"           # ties to safeguards.yaml reward_hacking_guards.frozen_prompts_dir
