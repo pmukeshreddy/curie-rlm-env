@@ -485,6 +485,64 @@ def test_local_docker_sandbox_client_lazy_imports_docker():
     assert client._containers == {}
 
 
+def test_local_docker_rlm_executor_subclasses_rlm_executor():
+    """LocalDockerRLMExecutor must be a real subclass of verifiers RLMExecutor."""
+    sys.path.insert(0, str(_PROJECT_ROOT / "src"))
+    from curie_rlm_env.local_executor import LocalDockerRLMExecutor
+    from verifiers.envs.experimental.rlm_env import RLMExecutor
+
+    assert issubclass(LocalDockerRLMExecutor, RLMExecutor)
+
+
+def test_local_docker_rlm_executor_overrides_teardown_paths():
+    """LocalDockerRLMExecutor must override every teardown method that constructs
+    prime_sandboxes.SandboxClient(APIClient()) inline upstream."""
+    sys.path.insert(0, str(_PROJECT_ROOT / "src"))
+    from curie_rlm_env.local_executor import LocalDockerRLMExecutor
+
+    for name in ("__init__", "teardown_sandboxes", "teardown"):
+        method = LocalDockerRLMExecutor.__dict__.get(name)
+        assert method is not None, (
+            f"LocalDockerRLMExecutor must override {name!r} to keep traffic off "
+            "prime_sandboxes — that's the whole point of the subclass"
+        )
+
+
+def test_local_docker_rlm_executor_does_not_import_prime_sandboxes():
+    """Source-level audit: the subclass must not import from prime_sandboxes.
+
+    Without that import, the upstream `SandboxClient(APIClient())` construction
+    pattern is impossible by construction — that's the whole point of the
+    subclass and a stronger guarantee than a substring grep against the file body.
+    """
+    import ast
+
+    src = (
+        _PROJECT_ROOT / "src" / "curie_rlm_env" / "local_executor.py"
+    ).read_text()
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            assert node.module != "prime_sandboxes", (
+                f"local_executor.py imports from prime_sandboxes at line {node.lineno}"
+            )
+            assert not (node.module or "").startswith("prime_sandboxes."), (
+                f"local_executor.py imports submodule of prime_sandboxes at line {node.lineno}"
+            )
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                assert alias.name != "prime_sandboxes", (
+                    f"local_executor.py imports prime_sandboxes at line {node.lineno}"
+                )
+
+
+def test_curie_rlm_env_uses_local_executor_after_super_init():
+    """Source-level audit: CurieRLMEnv.__init__ must replace self._executor with
+    LocalDockerRLMExecutor after super().__init__()."""
+    src = (_PROJECT_ROOT / "src" / "curie_rlm_env" / "env.py").read_text()
+    assert "self._executor = LocalDockerRLMExecutor(self)" in src
+
+
 def test_continual_scripts_default_sandbox_to_local_docker():
     """Each continual script must export CURIE_SANDBOX_BACKEND with local_docker default."""
     for continual_phase in (1, 2, 3):

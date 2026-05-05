@@ -30,10 +30,8 @@ from verifiers.types import State
 from .continual import CONTINUAL_SEED, load_continual_phase_dataset
 from .datasets import load_curie_task
 from .judge import make_gemini_judge_from_env
-from .local_sandbox import (
-    LocalDockerSandboxClient,
-    resolve_sandbox_backend,
-)
+from .local_executor import LocalDockerRLMExecutor
+from .local_sandbox import resolve_sandbox_backend
 from .rubric import CurieRubric
 from .schema import validate_answer
 
@@ -163,11 +161,19 @@ class CurieRLMEnv(RLMEnv):
 
         # Sandbox backend resolution is strict: only local_docker is valid; anything
         # else (including unset → defaulted) only ever returns "local_docker".
+        # The actual sandbox client lives on RLMExecutor (a SandboxMixin), not on
+        # the env; replace the executor wholesale with a subclass that wires
+        # LocalDockerSandboxClient through every code path (incl. the teardown
+        # methods that would otherwise construct prime_sandboxes.SandboxClient
+        # inline). See src/curie_rlm_env/local_executor.py for the design notes.
         self._curie_sandbox_backend = resolve_sandbox_backend()
-        existing = getattr(self, "sandbox_client", None)
-        if existing is not None and hasattr(existing, "teardown"):
-            existing.teardown(wait=False)
-        self.sandbox_client = LocalDockerSandboxClient()
+        if not hasattr(self, "_executor"):
+            raise RuntimeError(
+                "CurieRLMEnv: RLMEnv.__init__ did not set self._executor; "
+                "verifiers RLMExecutor wiring has changed."
+            )
+        self._executor.sandbox_client.teardown(wait=False)
+        self._executor = LocalDockerRLMExecutor(self)
 
     async def _setup_interception_and_register(
         self, state: State, rollout_id: str
