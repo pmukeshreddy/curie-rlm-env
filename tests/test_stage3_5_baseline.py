@@ -108,3 +108,44 @@ def test_baseline_default_split_is_test():
     assert "split='train'" not in code
     assert 'split="val"' not in code
     assert "split='val'" not in code
+
+
+# ---------------------------------------------------------------------------
+# Strict: _run_one_rollout no longer swallows infrastructure failures.
+# ---------------------------------------------------------------------------
+
+
+def test_run_one_rollout_propagates_exceptions():
+    """Strict default: a failed rollout must raise, not return reward=0."""
+    import asyncio
+
+    from curie_rlm_env.baseline_eval import _run_one_rollout
+
+    class _FailingEnv:
+        task_id = "DFT-C"
+        dataset = [{"prompt": [{"role": "user", "content": "x"}], "answer": '{"r": 1}', "info": {}}]
+
+        async def run_rollout(self, **_kwargs):
+            raise RuntimeError("simulated infra failure (e.g. sandbox death)")
+
+    sem = asyncio.Semaphore(1)
+    with pytest.raises(RuntimeError) as exc_info:
+        asyncio.run(_run_one_rollout(
+            env=_FailingEnv(), example_idx=0, client=None,
+            model="x", sampling_args={}, semaphore=sem,
+        ))
+    assert "simulated infra failure" in str(exc_info.value)
+
+
+def test_run_one_rollout_does_not_inject_reward_zero_on_error():
+    """Strict: the source must not contain a reward=0 record-emission catch."""
+    src = _BASELINE_SRC.read_text()
+    code = "\n".join(
+        line for line in src.splitlines() if not line.lstrip().startswith("#")
+    )
+    # Strict: no `"reward": 0.0` shaped record produced from an except block
+    # in the rollout function. The pre-fix code returned a fully-shaped dict
+    # with reward=0.0 from `except Exception as e:`. Verify the construct is gone.
+    assert "except Exception as e" not in code, (
+        "baseline_eval._run_one_rollout must not catch broad Exception"
+    )

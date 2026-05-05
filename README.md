@@ -3,11 +3,11 @@
 Quote from `src/curie_rlm_env/continual.py`:
 `Phase 2: 70% retrieval current tasks + 30% Phase 1 replay.`
 
-Private local research project implementing Google CURIE scientific long-context tasks with Recursive Language Models. The default policy model is `Qwen/Qwen3-8B`. The earlier `Qwen/Qwen3.5-7B-Instruct` was removed because it is not a valid Hugging Face repo (no Qwen3.5 family exists on HF — only Qwen2.5 and Qwen3); override the default at the prime-rl CLI with `--model.name <hf_repo>` if needed. The environment inherits the official `verifiers.envs.experimental.rlm_env.RLMEnv`; recursion, long-context execution, and sandboxed code run through Prime/verifiers.
+Private local research project implementing Google CURIE scientific long-context tasks with Recursive Language Models. The default policy model is `Qwen/Qwen3-8B`. The earlier `Qwen/Qwen3.5-7B-Instruct` was removed because it is not a valid Hugging Face repo (no Qwen3.5 family exists on HF — only Qwen2.5 and Qwen3); override the default at the prime-rl CLI with `--model.name <hf_repo>` if needed. The environment inherits the official `verifiers.envs.experimental.rlm_env.RLMEnv` for recursion and long-context execution, with the sandbox backend overridden to a local Docker daemon and the sub-LLM interception URL pinned to the local pod — there is no opt-out path back to Prime hosted services from this repo.
 
-## Local runtime (no Prime hosted services required)
+## Local runtime (the only supported runtime)
 
-Local single-pod training does NOT require `PRIME_API_KEY`. `CurieRLMEnv` runs sandboxes on the **local Docker daemon** by default and resolves a sandbox→env-worker callback URL locally — both the `prime_sandboxes` hosted backend and the `prime_tunnel` hosted tunnel are bypassed. Since the GPU pod is already paid for, this adds no separate Prime-billed sandbox usage.
+Local single-pod training is the only supported configuration. `CurieRLMEnv` runs sandboxes on the **local Docker daemon** and resolves a sandbox→env-worker callback URL locally — both the `prime_sandboxes` hosted backend and the `prime_tunnel` hosted tunnel are unconditionally bypassed. There is no opt-out path back to Prime hosted services. `PRIME_API_KEY` is not used by any local-training path; do not set it expecting different behavior.
 
 Required env vars (local training):
 
@@ -18,38 +18,31 @@ Required env vars (local training):
 | `WANDB_API_KEY` | W&B logging | Stage 5 (if W&B enabled) |
 | `GEMINI_API_KEY` | LLMSim judge for retrieval rewards | Continual Phases 2 and 3 only |
 
-NOT required for local training:
-
-| Variable | Purpose |
-|---|---|
-| `PRIME_API_KEY` | Prime hosted tunnel + hosted sandbox — only needed when `CURIE_USE_PRIME_TUNNEL=1` or `CURIE_SANDBOX_BACKEND=prime` |
-
 Optional local-routing knobs (all have defaults):
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `CURIE_SANDBOX_BACKEND` | `local_docker` | `local_docker` (run sandboxes via local Docker daemon) or `prime` (use hosted Prime sandboxes; requires `PRIME_API_KEY`) |
+| `CURIE_SANDBOX_BACKEND` | `local_docker` | Only `local_docker` is accepted; any other value raises at startup |
 | `CURIE_SANDBOX_NETWORK` | `bridge` | Docker network mode for sandbox containers (`bridge`, `host`, custom network name) |
 | `CURIE_LOCAL_INTERCEPTION_HOST` | `127.0.0.1` | Host portion of the sandbox→env-worker callback URL |
 | `CURIE_LOCAL_INTERCEPTION_PORT` | auto-assigned | Pin a fixed port; otherwise the URL is built after the interception server binds |
 | `CURIE_LOCAL_INTERCEPTION_BIND` | `127.0.0.1` | Bind interface; set `0.0.0.0` if the sandbox runs in a separate netns (e.g. docker bridge) |
 | `CURIE_LOCAL_INTERCEPTION_URL` | (composed) | Full override URL; takes precedence over HOST/PORT |
 | `INFERENCE_SERVER_API_KEY` | (none) | Local auth secret if your local inference server requires one |
-| `CURIE_USE_PRIME_TUNNEL` | unset | Set to `1` to opt into the hosted-tunnel path (requires `PRIME_API_KEY`) |
 
 Local Docker sandbox prerequisites:
 - Docker daemon reachable from the trainer process (e.g. `/var/run/docker.sock` mounted, or `DOCKER_HOST` set).
 - The `docker` Python SDK installed (`uv pip install docker`).
 - The image referenced in `safeguards.yaml` / `CreateSandboxRequest` is pullable (default `python:3.11-slim`).
 
-Verify routing:
+Verify the runtime:
 
 ```bash
 PYTHONPATH=/workspace/curie-rlm-env/src \
     uv run --project /workspace/prime-rl python scripts/check_local_runtime.py
 ```
 
-Exits 0 when local mode is healthy (Docker reachable, backend=local_docker, interception local), 1 otherwise. The earlier `scripts/check_local_inference_routing.py` checks only the interception path and is still available for narrower diagnosis.
+Exits 0 when local mode is healthy (Docker reachable, backend = local_docker, interception local) and 1 otherwise.
 
 ## Locked Stack
 

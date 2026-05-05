@@ -91,7 +91,45 @@ def test_extract_per_task_cap(tmp_path):
     assert by_task["HFE"] == 2    # 2 ≤ cap → kept
 
 
-def test_extract_skips_malformed(tmp_path):
+def test_extract_hard_fails_on_malformed_by_default(tmp_path):
+    """Strict default: malformed record raises with the offending file/line context."""
+    rollouts_dir = tmp_path / "rollouts"
+    rollouts_dir.mkdir()
+    records = [
+        _mk_record("DFT-C", 0.7),
+        {"reward": 0.9, "info": {"task_id": "DFT-C"}},  # missing prompt+completion
+    ]
+    _write_jsonl(rollouts_dir / "r1.jsonl", records)
+    out = tmp_path / "out.jsonl"
+
+    with pytest.raises(ValueError) as exc_info:
+        ex.extract_records(
+            rollouts_dir=rollouts_dir, output=out,
+            threshold=0.5, max_per_task=10, verbose=False,
+        )
+    assert "missing required fields" in str(exc_info.value)
+    assert "--allow-skip-malformed" in str(exc_info.value)
+
+
+def test_extract_hard_fails_on_bad_json_by_default(tmp_path):
+    rollouts_dir = tmp_path / "rollouts"
+    rollouts_dir.mkdir()
+    (rollouts_dir / "r1.jsonl").write_text(
+        json.dumps(_mk_record("DFT-C", 0.7)) + "\n{not valid json}\n"
+    )
+    out = tmp_path / "out.jsonl"
+
+    with pytest.raises(ValueError) as exc_info:
+        ex.extract_records(
+            rollouts_dir=rollouts_dir, output=out,
+            threshold=0.5, max_per_task=10, verbose=False,
+        )
+    assert "Malformed JSON" in str(exc_info.value)
+    assert "--allow-skip-malformed" in str(exc_info.value)
+
+
+def test_extract_skip_with_explicit_flag(tmp_path):
+    """Opt-in: --allow-skip-malformed restores the legacy skip-and-continue behavior."""
     rollouts_dir = tmp_path / "rollouts"
     rollouts_dir.mkdir()
     records = [
@@ -107,6 +145,7 @@ def test_extract_skips_malformed(tmp_path):
     result = ex.extract_records(
         rollouts_dir=rollouts_dir, output=out,
         threshold=0.5, max_per_task=10, verbose=False,
+        allow_skip_malformed=True,
     )
 
     # Only 2 records pass: the valid DFT-C(0.7) and HFE(0.6)
@@ -133,7 +172,8 @@ def test_rft_config_exists_and_parses():
     path = _CONFIGS / "curie_rft_phase1.toml"
     assert path.is_file()
     cfg = tomllib.loads(path.read_text())
-    assert cfg["model"]["ac"] is True
+    # RFT shares the prime-rl activation-checkpointing schema with the continual configs.
+    assert cfg["trainer"]["model"]["ac"] == {"freq": 1}
     assert cfg["wandb"]["project"] == "curie-rlm"
 
 

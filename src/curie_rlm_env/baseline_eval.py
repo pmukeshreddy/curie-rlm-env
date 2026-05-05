@@ -164,41 +164,29 @@ async def _run_one_rollout(
     sampling_args: dict[str, Any],
     semaphore: asyncio.Semaphore,
 ) -> dict[str, Any]:
-    """Run one rollout, capture metrics. On failure: log + return reward=0 record."""
+    """Run one rollout and return its metrics record.
+
+    Strict failure semantics: any exception during rollout propagates and stops
+    the whole eval. There is no infrastructure-failure → reward=0 substitution
+    in the default path; if a "best-effort" mode is ever needed it must live in
+    a separate, explicitly-named script.
+    """
     async with semaphore:
         info = env.dataset[example_idx].get("info", {}) or {}
-        record_id = info.get("record_id", f"unknown_{example_idx}")
-        try:
-            input_dict = {
-                "prompt": env.dataset[example_idx]["prompt"],
-                "answer": env.dataset[example_idx].get("answer", ""),
-                "task": env.task_id,
-                "info": info,
-                "example_id": example_idx,
-            }
-            output = await env.run_rollout(
-                input=input_dict,
-                client=client,
-                model=model,
-                sampling_args=sampling_args,
-            )
-            return _extract_rollout_record(env, example_idx, output)
-        except Exception as e:
-            logger.error(
-                "Rollout failed for task=%s record_id=%s: %s",
-                env.task_id, record_id, e,
-            )
-            return {
-                "task_id": env.task_id,
-                "record_id": record_id,
-                "reward": 0.0,
-                "headline_score": 0.0,
-                "auxiliary_scores": {"rouge_lsum": 0.0, "bert_f1": 0.0},
-                "tool_call_count": 0,
-                "num_turns": 0,
-                "completion_length": 0,
-                "error": str(e),
-            }
+        input_dict = {
+            "prompt": env.dataset[example_idx]["prompt"],
+            "answer": env.dataset[example_idx].get("answer", ""),
+            "task": env.task_id,
+            "info": info,
+            "example_id": example_idx,
+        }
+        output = await env.run_rollout(
+            input=input_dict,
+            client=client,
+            model=model,
+            sampling_args=sampling_args,
+        )
+        return _extract_rollout_record(env, example_idx, output)
 
 
 async def run_baseline(

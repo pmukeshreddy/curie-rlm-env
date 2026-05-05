@@ -179,7 +179,7 @@ def test_generate_report_imports():
 def test_generate_report_renders_table_correctly():
     import generate_report as gr
     eval_data = _mk_eval_json(["baseline", "phase3"], [0.4, 0.7], n=10)
-    md = gr.render_report(eval_data, ablation_data=None)
+    md = gr.render_report(eval_data, ablation_data=None, allow_missing_sections=True)
     # Every task name appears in the markdown
     for task in ("DFT-S", "DFT-P", "DFT-C", "MPVE", "BIOGR",
                  "PDB", "HFE", "HFD", "QECC_65", "GEO"):
@@ -194,7 +194,7 @@ def test_generate_report_flags_small_n():
     eval_data = _mk_eval_json(["baseline", "phase3"], [0.4, 0.7], n=10)
     # Override one task to small-N to check flag
     eval_data["per_checkpoint"]["phase3"]["per_task"]["HFD"]["n"] = 3
-    md = gr.render_report(eval_data, ablation_data=None)
+    md = gr.render_report(eval_data, ablation_data=None, allow_missing_sections=True)
     assert "small-N" in md
     # The HFD row should be flagged (small-N flag near HFD)
     hfd_lines = [line for line in md.splitlines() if "HFD" in line]
@@ -243,7 +243,7 @@ def test_generate_report_renders_na_for_missing_std():
     eval_data = _mk_eval_json(["baseline"], [0.5], n=10)
     # Sabotage: remove std from one task (legitimate for n=1)
     del eval_data["per_checkpoint"]["baseline"]["per_task"]["HFD"]["std"]
-    md = gr.render_report(eval_data, ablation_data=None)
+    md = gr.render_report(eval_data, ablation_data=None, allow_missing_sections=True)
     # The HFD row should render std as "n/a"
     hfd_lines = [line for line in md.splitlines() if line.startswith("| HFD ")]
     assert hfd_lines, "HFD row missing from rendered table"
@@ -255,7 +255,7 @@ def test_generate_report_renders_na_for_missing_std():
 def test_generate_report_caveats_section_present():
     import generate_report as gr
     eval_data = _mk_eval_json(["baseline"], [0.5], n=10)
-    md = gr.render_report(eval_data, ablation_data=None)
+    md = gr.render_report(eval_data, ablation_data=None, allow_missing_sections=True)
     assert "## Honest caveats" in md
     # 5 caveat bullets per spec
     caveats = [
@@ -272,7 +272,7 @@ def test_generate_report_caveats_section_present():
 def test_generate_report_config_snapshot_includes_all_yamls():
     import generate_report as gr
     eval_data = _mk_eval_json(["baseline"], [0.5], n=10)
-    md = gr.render_report(eval_data, ablation_data=None)
+    md = gr.render_report(eval_data, ablation_data=None, allow_missing_sections=True)
     # All 4 yaml configs
     for yaml_name in ("safeguards.yaml", "judge.yaml",
                       "rubric_dispatcher.yaml", "curie_tasks.yaml"):
@@ -289,7 +289,7 @@ def test_generate_report_per_task_delta_sorted():
     # Make GEO have biggest improvement, MPVE the next, etc.
     eval_data["per_checkpoint"]["phase3"]["per_task"]["GEO"]["mean_reward"] = 0.95
     eval_data["per_checkpoint"]["phase3"]["per_task"]["MPVE"]["mean_reward"] = 0.85
-    md = gr.render_report(eval_data, ablation_data=None)
+    md = gr.render_report(eval_data, ablation_data=None, allow_missing_sections=True)
     # Find the delta section, parse task order
     delta_section = md.split("Per-task delta:")[1].split("##")[0]
     rows = [
@@ -299,3 +299,45 @@ def test_generate_report_per_task_delta_sorted():
     # First non-zero delta should be GEO (largest), then MPVE
     assert "GEO" in rows[0], f"largest-delta row should be GEO; got: {rows[0]}"
     assert "MPVE" in rows[1], f"second-largest-delta row should be MPVE; got: {rows[1]}"
+
+
+def test_generate_report_hard_fails_on_missing_ablation_default():
+    """Strict default: ablation_data=None without the explicit flag is an error."""
+    import generate_report as gr
+    eval_data = _mk_eval_json(["baseline", "phase3"], [0.4, 0.7], n=10)
+    with pytest.raises(ValueError) as exc_info:
+        gr.render_report(eval_data, ablation_data=None)
+    assert "ablation" in str(exc_info.value).lower()
+
+
+def test_generate_report_hard_fails_on_single_checkpoint_default():
+    """Strict default: single-checkpoint eval can't render the delta section."""
+    import generate_report as gr
+    eval_data = _mk_eval_json(["baseline"], [0.5], n=10)
+    fake_ablation = {
+        "checkpoint": "baseline",
+        "mode_A_rlm_on": {"per_task": {t: {"mean_reward": 0.5} for t in (
+            "DFT-S", "DFT-P", "DFT-C", "MPVE", "BIOGR",
+            "PDB", "HFE", "HFD", "QECC_65", "GEO",
+        )}},
+        "mode_B_rlm_off": {"per_task": {t: {"mean_reward": 0.4} for t in (
+            "DFT-S", "DFT-P", "DFT-C", "MPVE", "BIOGR",
+            "PDB", "HFE", "HFD", "QECC_65", "GEO",
+        )}},
+        "delta_per_task": {t: 0.1 for t in (
+            "DFT-S", "DFT-P", "DFT-C", "MPVE", "BIOGR",
+            "PDB", "HFE", "HFD", "QECC_65", "GEO",
+        )},
+    }
+    with pytest.raises(ValueError) as exc_info:
+        gr.render_report(eval_data, ablation_data=fake_ablation)
+    assert "two checkpoints" in str(exc_info.value).lower()
+
+
+def test_generate_report_skip_with_explicit_flag():
+    """Opt-in: --allow-missing-sections renders the placeholder strings."""
+    import generate_report as gr
+    eval_data = _mk_eval_json(["baseline"], [0.5], n=10)
+    md = gr.render_report(eval_data, ablation_data=None, allow_missing_sections=True)
+    assert "Need at least two checkpoints" in md
+    assert "No ablation JSON provided" in md

@@ -135,3 +135,57 @@ def test_locked_seed_is_42():
 def test_default_ratios_sum_to_one():
     assert abs(sum(DEFAULT_RATIOS) - 1.0) < 1e-9
     assert DEFAULT_RATIOS == (0.7, 0.15, 0.15)
+
+
+# ---------------------------------------------------------------------------
+# Strict failure semantics for load_curie_task — no all-records-as-test fallback.
+# ---------------------------------------------------------------------------
+
+
+def test_load_curie_task_test_split_hard_fails_when_splits_file_missing(monkeypatch, tmp_path):
+    """Strict: missing data/curie/splits/test.jsonl raises FileNotFoundError, even for split='test'."""
+    from curie_rlm_env import datasets as ds
+
+    monkeypatch.setattr(ds, "_SPLITS_DIR", tmp_path)
+    with pytest.raises(FileNotFoundError) as exc_info:
+        ds.load_curie_task("DFT-C", "test")
+    assert "test.jsonl" in str(exc_info.value)
+    assert "build_splits.py" in str(exc_info.value)
+
+
+def test_load_curie_task_train_split_hard_fails_when_missing(monkeypatch, tmp_path):
+    from curie_rlm_env import datasets as ds
+
+    monkeypatch.setattr(ds, "_SPLITS_DIR", tmp_path)
+    with pytest.raises(FileNotFoundError):
+        ds.load_curie_task("DFT-C", "train")
+
+
+def test_load_curie_task_val_split_hard_fails_when_missing(monkeypatch, tmp_path):
+    from curie_rlm_env import datasets as ds
+
+    monkeypatch.setattr(ds, "_SPLITS_DIR", tmp_path)
+    with pytest.raises(FileNotFoundError):
+        ds.load_curie_task("DFT-C", "val")
+
+
+def test_datasets_module_does_not_export_legacy_loader():
+    """Strict: the all-records-as-test loader was deleted, not just unused."""
+    from curie_rlm_env import datasets as ds
+
+    assert not hasattr(ds, "_load_all_records"), (
+        "datasets._load_all_records must be removed — no all-records-as-test fallback path"
+    )
+
+
+def test_datasets_module_does_not_warn_about_legacy_fallback():
+    """Strict: no warnings.warn() in datasets.py — fallback path was removed entirely."""
+    src = (
+        Path(__file__).resolve().parent.parent
+        / "src" / "curie_rlm_env" / "datasets.py"
+    ).read_text()
+    assert "warnings.warn" not in src, (
+        "datasets.py must not call warnings.warn — strict failure replaces the legacy warning"
+    )
+    for phrase in ("legacy fallback", "Backward-compat fallback", "Backward compat fallback"):
+        assert phrase not in src, f"datasets.py still mentions {phrase!r}"

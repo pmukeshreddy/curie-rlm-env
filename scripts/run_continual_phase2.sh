@@ -3,8 +3,8 @@
 # Quote from configs/curie_grpo_continual_phase2.toml:
 # "Phase 2: 70% retrieval current tasks + 30% Phase 1 replay."
 #
-# Local-only training: PRIME_API_KEY is NOT required (see run_continual_phase1.sh
-# header for the local-interception env-var contract).
+# Local-only training (see run_continual_phase1.sh header for the env-var contract).
+# There is no opt-out path to Prime hosted services from this repo.
 set -euo pipefail
 
 if [[ -z "${INFERENCE_SERVER_IP:-}" ]]; then

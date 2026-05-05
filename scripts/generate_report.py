@@ -105,8 +105,15 @@ def _render_per_task_table(
 def _render_delta_section(
     eval_data: dict[str, Any],
     checkpoints: list[str],
+    allow_missing_sections: bool,
 ) -> str:
     if len(checkpoints) < 2:
+        if not allow_missing_sections:
+            raise ValueError(
+                f"generate_report: need at least two checkpoints to render the delta "
+                f"section; got {len(checkpoints)} ({checkpoints!r}). "
+                f"Pass --allow-missing-sections to render a 'skipped' placeholder."
+            )
         return "## Per-task delta\n\n(Need at least two checkpoints; skipped.)\n"
     first = checkpoints[0]
     last = checkpoints[-1]
@@ -133,8 +140,14 @@ def _render_delta_section(
     return "\n".join(lines)
 
 
-def _render_ablation_section(ablation: dict[str, Any]) -> str:
+def _render_ablation_section(ablation: dict[str, Any], allow_missing_sections: bool) -> str:
     if not ablation:
+        if not allow_missing_sections:
+            raise ValueError(
+                "generate_report: ablation JSON is required by default. "
+                "Pass --allow-missing-sections (or call render_report with "
+                "allow_missing_sections=True) to render a 'skipped' placeholder."
+            )
         return "## RLM ablation\n\n(No ablation JSON provided; skipped.)\n"
     on_per_task = require(ablation, "mode_A_rlm_on", "per_task")
     off_per_task = require(ablation, "mode_B_rlm_off", "per_task")
@@ -205,6 +218,7 @@ def _render_config_snapshot() -> str:
 def render_report(
     eval_data: dict[str, Any],
     ablation_data: dict[str, Any] | None,
+    allow_missing_sections: bool = False,
 ) -> str:
     metadata = require(eval_data, "metadata")
     checkpoints = require(eval_data, "checkpoints")
@@ -214,8 +228,8 @@ def render_report(
         "# Curie + RLM + DPPO+KL — Internal Results\n",
         _render_summary(metadata, checkpoints),
         _render_per_task_table(eval_data, checkpoints),
-        _render_delta_section(eval_data, checkpoints),
-        _render_ablation_section(ablation_data or {}),
+        _render_delta_section(eval_data, checkpoints, allow_missing_sections),
+        _render_ablation_section(ablation_data or {}, allow_missing_sections),
         _render_caveats(eval_data, checkpoints),
         _render_config_snapshot(),
     ]
@@ -225,8 +239,19 @@ def render_report(
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--eval", required=True, help="Path to results/full_eval.json")
-    p.add_argument("--ablation", default=None, help="Path to results/rlm_ablation.json (optional)")
+    p.add_argument(
+        "--ablation",
+        default=None,
+        help="Path to results/rlm_ablation.json (required by default; combine with "
+        "--allow-missing-sections to render a 'skipped' placeholder).",
+    )
     p.add_argument("--output", required=True, help="Output markdown path")
+    p.add_argument(
+        "--allow-missing-sections",
+        action="store_true",
+        help="Opt-in: render 'skipped' placeholders for missing ablation JSON or "
+        "single-checkpoint eval. Default: hard fail.",
+    )
     return p.parse_args()
 
 
@@ -234,7 +259,11 @@ def main() -> int:
     args = parse_args()
     eval_data = json.loads(Path(args.eval).read_text())
     ablation_data = json.loads(Path(args.ablation).read_text()) if args.ablation else None
-    report = render_report(eval_data, ablation_data)
+    report = render_report(
+        eval_data,
+        ablation_data,
+        allow_missing_sections=args.allow_missing_sections,
+    )
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(report)

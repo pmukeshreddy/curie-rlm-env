@@ -7,7 +7,6 @@ documented inline and in CLAUDE.md "Documented Deviations from Curie".
 from __future__ import annotations
 
 import math
-import re
 from pathlib import Path
 from typing import Any, Callable
 
@@ -158,12 +157,15 @@ def llm_sim(
         output = cached_llmsim_sync(judge_client, gt_item, json_pred, prompt)
         try:
             output_json = json5.loads(output)
-        except Exception:
-            inds = [m.start() for m in re.finditer(r",\s*\{", output)]
-            if inds:
-                output_json = json5.loads(output[: inds[-1]] + "]")
-            else:
-                output_json = []
+        except (ValueError, TypeError) as exc:
+            # Strict: malformed judge output is a real error, not something to
+            # repair into a valid list. Surface a truncated-safe excerpt so the
+            # operator can diagnose without leaking arbitrary judge content.
+            safe_excerpt = (output[:200] if isinstance(output, str) else repr(output))[:200]
+            raise ValueError(
+                f"LLMSim judge returned malformed JSON for gt index {j} "
+                f"(raw output excerpt, ≤200 chars): {safe_excerpt!r}"
+            ) from exc
         if isinstance(output_json, list):
             output_json = output_json[0] if output_json else {}
         eval_list.append(output_json)

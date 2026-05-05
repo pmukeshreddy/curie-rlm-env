@@ -41,12 +41,10 @@ _CFG_PATH = (
     Path(__file__).resolve().parent.parent.parent / "config" / "safeguards.yaml"
 )
 
-# Local-inference routing env vars (bypass prime_tunnel for single-pod local training).
-# RLMEnv falls back to prime_tunnel.Tunnel() when its `_interception_url_override` is
-# unset (verifiers/envs/experimental/rlm_env.py:3445), which raises
-#   TunnelError("No API key configured. Set PRIME_API_KEY environment variable.")
-# from prime_tunnel/core/client.py:75. Setting the override skips that branch.
-_USE_PRIME_TUNNEL_ENV = "CURIE_USE_PRIME_TUNNEL"
+# Local-inference routing env vars. Setting `_interception_url_override` on the RLMEnv
+# bypasses the prime_tunnel.Tunnel code path at verifiers/envs/experimental/rlm_env.py:3445
+# (which raises `TunnelError("No API key configured. Set PRIME_API_KEY environment variable.")`
+# from prime_tunnel/core/client.py:75). Local routing is mandatory; there is no opt-out.
 _INTERCEPTION_URL_ENV = "CURIE_LOCAL_INTERCEPTION_URL"
 _INTERCEPTION_HOST_ENV = "CURIE_LOCAL_INTERCEPTION_HOST"
 _INTERCEPTION_PORT_ENV = "CURIE_LOCAL_INTERCEPTION_PORT"
@@ -64,29 +62,21 @@ class _LocalInterceptionSettings(TypedDict):
     auto_port: bool
 
 
-def _truthy(value: str | None) -> bool:
-    return (value or "").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def resolve_local_interception_settings() -> Optional[_LocalInterceptionSettings]:
+def resolve_local_interception_settings() -> _LocalInterceptionSettings:
     """Resolve sandbox→env-worker callback URL for local-only training.
 
-    Returns None when CURIE_USE_PRIME_TUNNEL=1 (caller wants the original prime_tunnel
-    behavior, which requires PRIME_API_KEY). Otherwise returns settings the caller
-    applies to the RLMEnv instance to bypass the tunnel.
+    Always returns a settings dict (never None). Raises ValueError on misconfigured
+    env vars — there is no opt-out path back to the prime_tunnel hosted service.
 
     Resolution order:
-      1. CURIE_USE_PRIME_TUNNEL=1                       → None (opt out)
-      2. CURIE_LOCAL_INTERCEPTION_URL=http://host:port  → use that exact URL, pin port
-      3. CURIE_LOCAL_INTERCEPTION_PORT=N                → http://HOST:N, pin port
-      4. (no port set)                                   → auto-assign port; URL is
+      1. CURIE_LOCAL_INTERCEPTION_URL=http://host:port  → use that exact URL, pin port
+      2. CURIE_LOCAL_INTERCEPTION_PORT=N                → http://HOST:N, pin port
+      3. (no port set)                                   → auto-assign port; URL is
          http://HOST:<actual_port> after the interception server binds.
 
     HOST defaults to 127.0.0.1; BIND defaults to 127.0.0.1 (set 0.0.0.0 if the sandbox
     runs in a separate network namespace, e.g. docker bridge).
     """
-    if _truthy(os.environ.get(_USE_PRIME_TUNNEL_ENV)):
-        return None
     bind = os.environ.get(_INTERCEPTION_BIND_ENV, _DEFAULT_LOCAL_BIND)
     explicit_url = os.environ.get(_INTERCEPTION_URL_ENV)
     if explicit_url:
@@ -164,37 +154,25 @@ class CurieRLMEnv(RLMEnv):
         self.seed = seed
 
         settings = resolve_local_interception_settings()
-        if settings is None:
-            self._curie_local_inference = False
-            self._curie_local_host = _DEFAULT_LOCAL_HOST
-            self._curie_local_auto_port = False
-        else:
-            self._curie_local_inference = True
-            self._curie_local_host = settings["host"]
-            self._curie_local_auto_port = settings["auto_port"]
-            self._interception_bind_host = settings["bind"]
-            self.interception_port = settings["port"]
-            if settings["override_url"] is not None:
-                self._interception_url_override = settings["override_url"]
+        self._curie_local_host = settings["host"]
+        self._curie_local_auto_port = settings["auto_port"]
+        self._interception_bind_host = settings["bind"]
+        self.interception_port = settings["port"]
+        if settings["override_url"] is not None:
+            self._interception_url_override = settings["override_url"]
 
+        # Sandbox backend resolution is strict: only local_docker is valid; anything
+        # else (including unset → defaulted) only ever returns "local_docker".
         self._curie_sandbox_backend = resolve_sandbox_backend()
-        if self._curie_sandbox_backend == "local_docker":
-            existing = getattr(self, "sandbox_client", None)
-            if existing is not None and hasattr(existing, "teardown"):
-                try:
-                    existing.teardown(wait=False)
-                except Exception:
-                    pass
-            self.sandbox_client = LocalDockerSandboxClient()
+        existing = getattr(self, "sandbox_client", None)
+        if existing is not None and hasattr(existing, "teardown"):
+            existing.teardown(wait=False)
+        self.sandbox_client = LocalDockerSandboxClient()
 
     async def _setup_interception_and_register(
         self, state: State, rollout_id: str
     ) -> State:
-        if (
-            self._curie_local_inference
-            and self._curie_local_auto_port
-            and not self._interception_url_override
-        ):
+        if self._curie_local_auto_port and not self._interception_url_override:
             await self._ensure_interception_server()
             self._interception_url_override = (
                 f"http://{self._curie_local_host}:{self.interception_port}"

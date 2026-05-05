@@ -554,3 +554,126 @@ def test_zero_anti_hack_reward_functions(rubric_default):
         "_aux_rouge_lsum", "_aux_bert_f1",
     ])
     assert func_names == expected
+
+
+# ===========================================================================
+# Strict failure semantics: invalid PREDICTION → 0; invalid REFERENCE → raise.
+# ===========================================================================
+
+
+def _call_reward(rubric: CurieRubric, fn_name: str, task_id: str, completion: str, answer: str):
+    fn = getattr(rubric, fn_name)
+    state = _make_state(task_id, completion, answer)
+    return asyncio.run(fn(
+        prompt=state["prompt"], completion=completion, answer=answer,
+        state=state, task=task_id, info=state["info"],
+    ))
+
+
+def test_llmsim_reward_raises_on_malformed_reference(rubric_match):
+    with pytest.raises(ValueError):
+        _call_reward(rubric_match, "_llmsim_reward", "DFT-S",
+                     completion='[{"foo": "bar"}]', answer="this is not JSON {{")
+
+
+def test_llmsim_reward_raises_on_empty_reference(rubric_match):
+    with pytest.raises(ValueError):
+        _call_reward(rubric_match, "_llmsim_reward", "DFT-S",
+                     completion='[{"foo": "bar"}]', answer="")
+
+
+def test_llmsim_reward_returns_zero_on_malformed_prediction(rubric_match):
+    """Strict: invalid PREDICTION still returns 0 silently — model's fault, not data's."""
+    score = _call_reward(rubric_match, "_llmsim_reward", "DFT-S",
+                         completion="not parseable JSON {{", answer='[{"foo": "bar"}]')
+    assert score == 0.0
+
+
+def test_iou_reward_raises_on_non_dict_reference(rubric_default):
+    with pytest.raises(ValueError):
+        _call_reward(rubric_default, "_iou_reward", "BIOGR",
+                     completion='{"W":0,"S":0,"E":1,"N":1}', answer='[1,2,3,4]')
+
+
+def test_iou_reward_raises_on_missing_reference_keys(rubric_default):
+    with pytest.raises(ValueError):
+        _call_reward(rubric_default, "_iou_reward", "BIOGR",
+                     completion='{"W":0,"S":0,"E":1,"N":1}', answer='{"W":0,"S":0,"E":1}')
+
+
+def test_iou_reward_returns_zero_on_malformed_prediction(rubric_default):
+    score = _call_reward(rubric_default, "_iou_reward", "BIOGR",
+                         completion="not json", answer='{"W":0,"S":0,"E":1,"N":1}')
+    assert score == 0.0
+
+
+def test_idr_reward_raises_on_missing_sequence_field(rubric_default):
+    with pytest.raises(ValueError):
+        _call_reward(rubric_default, "_idr_reward", "PDB",
+                     completion=_pdb_fasta("ACGT"), answer='{"other": "field"}')
+
+
+def test_idr_reward_raises_on_empty_sequence(rubric_default):
+    with pytest.raises(ValueError):
+        _call_reward(rubric_default, "_idr_reward", "PDB",
+                     completion=_pdb_fasta("ACGT"), answer='{"sequence": ""}')
+
+
+def test_freeform_rouge_raises_on_empty_reference(rubric_default):
+    with pytest.raises(ValueError):
+        _call_reward(rubric_default, "_rouge_freeform_reward", "HFE",
+                     completion="some prediction text", answer="")
+
+
+def test_freeform_bert_raises_on_empty_reference(rubric_default):
+    with pytest.raises(ValueError):
+        _call_reward(rubric_default, "_bert_freeform_reward", "HFE",
+                     completion="some prediction text", answer="")
+
+
+def test_freeform_returns_zero_on_empty_prediction(rubric_default):
+    """Strict: empty prediction with valid reference → 0 silently."""
+    score = _call_reward(rubric_default, "_rouge_freeform_reward", "HFE",
+                         completion="", answer="real reference text here")
+    assert score == 0.0
+
+
+# ===========================================================================
+# Strict LLMSim: malformed judge JSON raises (no repair fallback).
+# ===========================================================================
+
+
+def test_llm_sim_raises_on_malformed_judge_output():
+    """scorers.llm_sim must raise when judge_client returns invalid JSON; no repair."""
+    from curie_rlm_env.judge_cache import clear_cache
+
+    prompt_path = _FROZEN_PROMPTS / "dft_structure.txt"
+    if not prompt_path.is_file():
+        pytest.skip("LLMSim prompt file not present in this checkout")
+
+    # Clear judge cache to avoid being short-circuited by an earlier test that
+    # cached a valid judge response for the same (gt, pred) key.
+    clear_cache()
+
+    def malformed_judge(_prompt: str) -> str:
+        return "this is not JSON, {{"
+
+    with pytest.raises(ValueError) as exc_info:
+        llm_sim(
+            json_pred=[{"strict_failure_audit_unique_pred_key": "v1"}],
+            json_ref=[{"strict_failure_audit_unique_ref_key": "v1"}],
+            prompt_path=str(prompt_path),
+            judge_client=malformed_judge,
+        )
+    assert "malformed JSON" in str(exc_info.value)
+    clear_cache()
+
+
+def test_scorers_llm_sim_does_not_have_repair_branch():
+    """Defensive: source must not contain the deleted JSON-repair regex pattern."""
+    src = (
+        Path(__file__).resolve().parent.parent
+        / "src" / "curie_rlm_env" / "scorers.py"
+    ).read_text()
+    assert 're.finditer(r",\\s*\\{"' not in src, "scorers.py still has the JSON-repair regex"
+    assert "= json5.loads(output[: inds[-1]] + \"]\")" not in src

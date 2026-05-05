@@ -1,14 +1,13 @@
 """Diagnostic — verify CurieRLMEnv's local sandbox + inference routing.
 
-Reports:
-  * Docker daemon availability
-  * Resolved sandbox backend (local_docker vs prime)
-  * Local interception URL settings (sandbox→env-worker callback)
-  * Presence (NOT values) of every routing-relevant env var
-  * Whether `from curie_rlm_env.env import CurieRLMEnv` succeeds
+Local Docker is the ONLY supported sandbox backend; there is no opt-in to
+hosted Prime services from this repo. This script exits 0 when:
+  * CURIE_SANDBOX_BACKEND resolves to local_docker (default; only valid value)
+  * the local Docker daemon is reachable
+  * local interception settings parse cleanly
+  * `from curie_rlm_env.env import CurieRLMEnv` succeeds
 
-Exits 0 when local mode is healthy (Docker reachable AND backend=local_docker
-AND interception is local), 1 otherwise.
+Otherwise it exits 1 and prints what's missing.
 
 Usage:
     PYTHONPATH=/workspace/curie-rlm-env/src \\
@@ -22,7 +21,6 @@ import sys
 
 _ROUTING_VARS = (
     "CURIE_SANDBOX_BACKEND",
-    "CURIE_USE_PRIME_TUNNEL",
     "CURIE_LOCAL_INTERCEPTION_URL",
     "CURIE_LOCAL_INTERCEPTION_HOST",
     "CURIE_LOCAL_INTERCEPTION_PORT",
@@ -32,7 +30,6 @@ _ROUTING_VARS = (
     "INFERENCE_SERVER_API_KEY",
     "OPENAI_BASE_URL",
     "OPENAI_API_KEY",
-    "PRIME_API_KEY",
     "HF_TOKEN",
     "WANDB_API_KEY",
     "GEMINI_API_KEY",
@@ -40,7 +37,6 @@ _ROUTING_VARS = (
 
 _NON_SECRET_VARS = {
     "CURIE_SANDBOX_BACKEND",
-    "CURIE_USE_PRIME_TUNNEL",
     "CURIE_LOCAL_INTERCEPTION_URL",
     "CURIE_LOCAL_INTERCEPTION_HOST",
     "CURIE_LOCAL_INTERCEPTION_PORT",
@@ -91,7 +87,7 @@ def main() -> int:
     except ValueError as exc:
         print(f"  ERROR: {exc}", file=sys.stderr)
         return 1
-    print(f"  CURIE_SANDBOX_BACKEND={backend}")
+    print(f"  CURIE_SANDBOX_BACKEND={backend}  (local_docker is the only supported value)")
 
     print()
     print("=== Docker availability ===")
@@ -105,18 +101,16 @@ def main() -> int:
     except Exception as exc:
         print(f"  ERROR: failed to import curie_rlm_env.env: {exc}", file=sys.stderr)
         return 1
-    settings = resolve_local_interception_settings()
-    if settings is None:
-        print("  mode=PRIME_TUNNEL  (CURIE_USE_PRIME_TUNNEL is set)")
-        interception_local = False
-    else:
-        print("  mode=LOCAL  (no prime_tunnel; PRIME_API_KEY NOT required)")
-        print(f"  override_url={settings['override_url']!r}")
-        print(f"  host={settings['host']}")
-        port_note = "  (auto-assigned at first rollout)" if settings["auto_port"] else ""
-        print(f"  port={settings['port']}{port_note}")
-        print(f"  bind={settings['bind']}")
-        interception_local = True
+    try:
+        settings = resolve_local_interception_settings()
+    except ValueError as exc:
+        print(f"  ERROR: {exc}", file=sys.stderr)
+        return 1
+    print(f"  override_url={settings['override_url']!r}")
+    print(f"  host={settings['host']}")
+    port_note = "  (auto-assigned at first rollout)" if settings["auto_port"] else ""
+    print(f"  port={settings['port']}{port_note}")
+    print(f"  bind={settings['bind']}")
 
     print()
     print("=== CurieRLMEnv import check ===")
@@ -130,24 +124,17 @@ def main() -> int:
 
     print()
     print("=== Summary ===")
-    healthy_local = (
-        backend == "local_docker"
-        and docker_ok
-        and interception_local
-        and env_import_ok
-    )
-    if healthy_local:
-        print("  LOCAL MODE HEALTHY: PRIME_API_KEY is NOT required for training.")
+    healthy = docker_ok and env_import_ok and backend == "local_docker"
+    if healthy:
+        print("  LOCAL MODE HEALTHY: PRIME_API_KEY is not part of the training path.")
         print("  Sandboxes will run on the local Docker daemon; sub-LLM callbacks")
         print("  reach the env worker via the local interception URL.")
         return 0
-    print("  LOCAL MODE NOT FULLY HEALTHY:")
+    print("  LOCAL MODE NOT HEALTHY:")
     if backend != "local_docker":
-        print("    - sandbox backend is not 'local_docker' (PRIME_API_KEY required)")
+        print(f"    - sandbox backend resolved to {backend!r} (only 'local_docker' is supported)")
     if not docker_ok:
         print(f"    - Docker: {docker_msg}")
-    if not interception_local:
-        print("    - interception is in PRIME_TUNNEL mode (PRIME_API_KEY required)")
     if not env_import_ok:
         print("    - CurieRLMEnv import failed (see above)")
     return 1

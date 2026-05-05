@@ -3,13 +3,11 @@
 # Quote from configs/curie_grpo_continual_phase1.toml:
 # "args = { continual_phase = 1, split = \"train\", seed = 42 }"
 #
-# Local-only training: PRIME_API_KEY is NOT required. CurieRLMEnv resolves a local
-# sandbox→env-worker callback URL at startup (default http://127.0.0.1:<auto_port>),
-# bypassing prime_tunnel. Sandboxes default to LOCAL DOCKER on the same pod
-# (CURIE_SANDBOX_BACKEND=local_docker), so prime_sandboxes' hosted backend is also
-# bypassed. Override via CURIE_LOCAL_INTERCEPTION_HOST / _PORT / _BIND / _URL.
-# Set CURIE_USE_PRIME_TUNNEL=1 to opt into the hosted tunnel path, or
-# CURIE_SANDBOX_BACKEND=prime to opt into hosted sandboxes (both require PRIME_API_KEY).
+# Local-only training. CurieRLMEnv resolves a local sandbox→env-worker callback URL
+# at startup (default http://127.0.0.1:<auto_port>) and runs sandboxes via the local
+# Docker daemon (CURIE_SANDBOX_BACKEND=local_docker — the only supported value).
+# Override the interception URL via CURIE_LOCAL_INTERCEPTION_HOST / _PORT / _BIND / _URL.
+# There is no opt-out path to Prime hosted services from this repo.
 set -euo pipefail
 
 if [[ -z "${INFERENCE_SERVER_IP:-}" ]]; then

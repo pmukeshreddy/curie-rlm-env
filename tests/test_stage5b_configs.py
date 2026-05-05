@@ -293,19 +293,18 @@ def test_continual_scripts_do_not_hard_require_prime_api_key():
             )
 
 
-def test_readme_documents_prime_api_key_as_not_required_for_local():
-    """README must explicitly mark PRIME_API_KEY as NOT required for local training."""
+def test_readme_documents_prime_api_key_as_not_used_for_local():
+    """README must state that PRIME_API_KEY is not used by any local-training path."""
     readme = (_PROJECT_ROOT / "README.md").read_text()
     assert "PRIME_API_KEY" in readme, "README must mention PRIME_API_KEY status"
-    not_required_phrases = (
-        "does not require `PRIME_API_KEY`",
-        "does NOT require `PRIME_API_KEY`",
-        "not require `PRIME_API_KEY`",
+    not_used_phrases = (
+        "PRIME_API_KEY` is not used",
+        "PRIME_API_KEY is not used",
         "PRIME_API_KEY is not required",
-        "PRIME_API_KEY` | Prime hosted tunnel",  # the "NOT required" table row
+        "does not require `PRIME_API_KEY`",
     )
-    assert any(phrase in readme for phrase in not_required_phrases), (
-        "README must explicitly state that PRIME_API_KEY is not required for local training"
+    assert any(phrase in readme for phrase in not_used_phrases), (
+        "README must explicitly state that PRIME_API_KEY is not used by local-training paths"
     )
 
 
@@ -341,13 +340,16 @@ def test_resolve_local_interception_returns_local_mode_by_default(monkeypatch):
     assert settings["override_url"] is None  # built lazily after server bind
 
 
-def test_resolve_local_interception_opts_out_with_prime_tunnel_flag(monkeypatch):
+def test_resolve_local_interception_never_returns_none_with_prime_tunnel_set(monkeypatch):
+    """Strict: CURIE_USE_PRIME_TUNNEL=1 is no longer an opt-out; routing stays local."""
     sys.path.insert(0, str(_PROJECT_ROOT / "src"))
     from curie_rlm_env.env import resolve_local_interception_settings
 
     _reset_routing_env(monkeypatch)
-    monkeypatch.setenv("CURIE_USE_PRIME_TUNNEL", "1")
-    assert resolve_local_interception_settings() is None
+    monkeypatch.setenv("CURIE_USE_PRIME_TUNNEL", "1")  # ignored — local routing is mandatory
+    settings = resolve_local_interception_settings()
+    assert settings is not None
+    assert settings["host"] == "127.0.0.1"
 
 
 def test_resolve_local_interception_pins_port_when_set(monkeypatch):
@@ -436,23 +438,16 @@ def test_resolve_sandbox_backend_defaults_to_local_docker(monkeypatch):
     assert resolve_sandbox_backend() == "local_docker"
 
 
-def test_resolve_sandbox_backend_accepts_prime_opt_in(monkeypatch):
+def test_resolve_sandbox_backend_only_accepts_local_docker(monkeypatch):
+    """Strict: 'prime' is no longer a valid backend; only local_docker is supported."""
     sys.path.insert(0, str(_PROJECT_ROOT / "src"))
     from curie_rlm_env.local_sandbox import resolve_sandbox_backend
 
     _reset_sandbox_env(monkeypatch)
-    monkeypatch.setenv("CURIE_SANDBOX_BACKEND", "prime")
-    assert resolve_sandbox_backend() == "prime"
-
-
-def test_resolve_sandbox_backend_rejects_unknown(monkeypatch):
-    sys.path.insert(0, str(_PROJECT_ROOT / "src"))
-    from curie_rlm_env.local_sandbox import resolve_sandbox_backend
-
-    _reset_sandbox_env(monkeypatch)
-    monkeypatch.setenv("CURIE_SANDBOX_BACKEND", "subprocess")
-    with _pytest.raises(ValueError):
-        resolve_sandbox_backend()
+    for invalid in ("prime", "subprocess", "remote", "hosted"):
+        monkeypatch.setenv("CURIE_SANDBOX_BACKEND", invalid)
+        with _pytest.raises(ValueError):
+            resolve_sandbox_backend()
 
 
 def test_local_docker_sandbox_client_implements_required_interface():
@@ -509,15 +504,6 @@ def test_readme_documents_local_docker_default():
     assert "local_docker" in readme
     assert "CURIE_SANDBOX_BACKEND" in readme
     assert "PRIME_API_KEY" in readme
-    # README explicitly states PRIME_API_KEY is not required for the default mode.
-    assert any(
-        phrase in readme
-        for phrase in (
-            "does not require `PRIME_API_KEY`",
-            "does NOT require `PRIME_API_KEY`",
-            "PRIME_API_KEY is not required",
-        )
-    )
 
 
 def test_continual_design_unchanged_after_local_sandbox():
@@ -554,3 +540,116 @@ def test_curie_rubric_signature_unchanged():
 
     params = inspect.signature(CurieRubric.__init__).parameters
     assert "judge_client" in params, "CurieRubric.__init__ must accept judge_client"
+
+
+# ---------------------------------------------------------------------------
+# Strict: no opt-out paths anywhere in source / scripts / docs
+# ---------------------------------------------------------------------------
+
+
+_AUDITED_DIRS = ("configs", "scripts", "src", "tests")
+
+
+def _audit_files() -> list[Path]:
+    files: list[Path] = []
+    for d in _AUDITED_DIRS:
+        files.extend((_PROJECT_ROOT / d).rglob("*.py"))
+        files.extend((_PROJECT_ROOT / d).rglob("*.sh"))
+        files.extend((_PROJECT_ROOT / d).rglob("*.toml"))
+    files.append(_PROJECT_ROOT / "README.md")
+    return [p for p in files if "__pycache__" not in p.parts]
+
+
+# Test files are allowed to mention these tokens in NEGATIVE assertions; we still
+# check production code (src + scripts + configs + docs) is clean.
+_PROD_DIRS = ("configs", "scripts", "src")
+
+
+def _prod_files() -> list[Path]:
+    files: list[Path] = []
+    for d in _PROD_DIRS:
+        files.extend((_PROJECT_ROOT / d).rglob("*.py"))
+        files.extend((_PROJECT_ROOT / d).rglob("*.sh"))
+        files.extend((_PROJECT_ROOT / d).rglob("*.toml"))
+    files.append(_PROJECT_ROOT / "README.md")
+    return [p for p in files if "__pycache__" not in p.parts]
+
+
+def test_no_curie_use_prime_tunnel_anywhere():
+    """The CURIE_USE_PRIME_TUNNEL opt-out env var was removed; no source may reference it."""
+    offenders: list[str] = []
+    for path in _prod_files():
+        if "CURIE_USE_PRIME_TUNNEL" in path.read_text():
+            offenders.append(str(path.relative_to(_PROJECT_ROOT)))
+    assert not offenders, (
+        f"CURIE_USE_PRIME_TUNNEL still referenced in production paths: {offenders}"
+    )
+
+
+def test_no_prod_source_documents_prime_api_key_as_opt_in():
+    """Production code/docs must not present PRIME_API_KEY as an opt-in path.
+
+    Allowed: README documenting it as 'not used'; comments quoting upstream
+    error strings (e.g. the verifiers/prime_tunnel error text). Forbidden:
+    any line that suggests setting PRIME_API_KEY enables a working code path.
+    """
+    forbidden_phrases = (
+        "set CURIE_USE_PRIME_TUNNEL",
+        "set CURIE_SANDBOX_BACKEND=prime",
+        "opt into the hosted",
+        "opt back into the hosted",
+        "PRIME_API_KEY is REQUIRED",
+        "PRIME_API_KEY is required",
+    )
+    offenders: list[tuple[str, str]] = []
+    for path in _prod_files():
+        text = path.read_text()
+        for phrase in forbidden_phrases:
+            if phrase.lower() in text.lower():
+                offenders.append((str(path.relative_to(_PROJECT_ROOT)), phrase))
+    assert not offenders, (
+        f"Production paths still document an opt-in to Prime hosted services: {offenders}"
+    )
+
+
+def test_no_affirmative_fallback_phrasing_in_prod_source():
+    """Strict-failure audit: production source must not advertise fallback paths.
+
+    Affirmative patterns ('falls back to', 'legacy behavior', 'backward-compat
+    fallback', 'fallback path') describe a path that exists. Strict-failure
+    documentation ('ZERO-FALLBACK', 'no fallback', 'never fall back') is fine
+    — those are explicit statements that no such path exists, which is the
+    audit's whole point. The test forbids the former and allows the latter.
+    """
+    forbidden = (
+        "falls back to",
+        "fall back to",
+        "fallback path",
+        "fallback behavior",
+        "legacy behavior",
+        "legacy fallback",
+        "backward-compat fallback",
+        "backward compat fallback",
+    )
+    offenders: list[tuple[str, str]] = []
+    for path in (_PROJECT_ROOT / "src").rglob("*.py"):
+        if "__pycache__" in path.parts:
+            continue
+        text = path.read_text().lower()
+        for phrase in forbidden:
+            if phrase in text:
+                offenders.append((str(path.relative_to(_PROJECT_ROOT)), phrase))
+    assert not offenders, (
+        f"Production src/ still contains fallback advertisement language: {offenders}"
+    )
+
+
+def test_resolve_local_interception_rejects_url_without_port(monkeypatch):
+    """Misconfigured URL (no port) must raise — no silent repair to a default port."""
+    sys.path.insert(0, str(_PROJECT_ROOT / "src"))
+    from curie_rlm_env.env import resolve_local_interception_settings
+
+    _reset_routing_env(monkeypatch)
+    monkeypatch.setenv("CURIE_LOCAL_INTERCEPTION_URL", "http://my-host")
+    with _pytest.raises(ValueError):
+        resolve_local_interception_settings()

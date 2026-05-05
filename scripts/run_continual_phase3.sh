@@ -3,8 +3,8 @@
 # Quote from configs/curie_grpo_continual_phase3.toml:
 # "Phase 2 replay: DFT-S, DFT-P, MPVE."
 #
-# Local-only training: PRIME_API_KEY is NOT required (see run_continual_phase1.sh
-# header for the local-interception env-var contract).
+# Local-only training (see run_continual_phase1.sh header for the env-var contract).
+# There is no opt-out path to Prime hosted services from this repo.
 set -euo pipefail
 
 if [[ -z "${INFERENCE_SERVER_IP:-}" ]]; then

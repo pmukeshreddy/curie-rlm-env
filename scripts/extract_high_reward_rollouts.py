@@ -2,16 +2,20 @@
 
 Reads prime-rl rollout records (schema-agnostic — prime-rl's exact rollout
 output schema is NOT verified from web docs per Stage 5b OQ-A precedent).
-Validates each record has the required fields; skips + logs records that
-don't. Filters by reward threshold, caps per-task, writes prime-rl SFT
-format (per Stage 4a §3) to a single JSONL file.
+Filters by reward threshold, caps per-task, writes prime-rl SFT format
+(per Stage 4a §3) to a single JSONL file.
 
 Output schema (per Stage 4a memo):
     {"messages": [...], "task_id": "...", "reward": 0.7}
 
-ZERO-FALLBACK:
+ZERO-FALLBACK (default):
 - Missing --rollouts-dir → hard fail.
 - Empty filtered set (0 above threshold) → hard fail with remediation hint.
+- Malformed JSON line OR record missing required fields → hard fail with the
+  offending file/line excerpt.
+
+To opt into the legacy skip-and-continue behavior, pass --allow-skip-malformed.
+That flag is intended for one-off forensic runs, not the default path.
 """
 from __future__ import annotations
 
@@ -133,8 +137,14 @@ def extract_records(
     threshold: float,
     max_per_task: int,
     verbose: bool = True,
+    allow_skip_malformed: bool = False,
 ) -> list[dict[str, Any]]:
-    """Main extraction. Used by CLI and tests."""
+    """Main extraction. Used by CLI and tests.
+
+    By default, malformed records (bad JSON OR missing required fields) raise
+    ValueError with the offending file/line. Pass `allow_skip_malformed=True`
+    to opt into the legacy skip-and-continue behavior.
+    """
     rollouts_path = Path(rollouts_dir)
     if not rollouts_path.is_dir():
         raise SystemExit(
@@ -150,19 +160,32 @@ def extract_records(
     skipped = 0
     raw_count = 0
     for p in paths:
-        for line in p.read_text().splitlines():
+        for lineno, line in enumerate(p.read_text().splitlines(), start=1):
             if not line.strip():
                 continue
             raw_count += 1
             try:
                 record = json.loads(line)
-            except json.JSONDecodeError:
-                skipped += 1
-                continue
+            except json.JSONDecodeError as exc:
+                if allow_skip_malformed:
+                    skipped += 1
+                    continue
+                excerpt = line[:200]
+                raise ValueError(
+                    f"Malformed JSON in {p}:{lineno}: {exc}; "
+                    f"line excerpt (≤200 chars): {excerpt!r}. "
+                    f"Pass --allow-skip-malformed to skip and continue."
+                ) from exc
             norm = _normalize_record(record)
             if norm is None:
-                skipped += 1
-                continue
+                if allow_skip_malformed:
+                    skipped += 1
+                    continue
+                raise ValueError(
+                    f"Record at {p}:{lineno} is missing required fields "
+                    f"(messages|prompt+completion, reward|info.reward|score, task_id|info.task_id|task). "
+                    f"Pass --allow-skip-malformed to skip and continue."
+                )
             raw.append(norm)
 
     above = [r for r in raw if r["reward"] >= threshold]
@@ -194,6 +217,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output", required=True, help="Output JSONL path for filtered+capped records")
     p.add_argument("--threshold", type=float, default=0.5, help="Reward threshold (records with reward >= T pass)")
     p.add_argument("--max-per-task", type=int, default=50, help="Per-task cap on retained records (top-K by reward)")
+    p.add_argument(
+        "--allow-skip-malformed",
+        action="store_true",
+        help="Opt-in: skip and count malformed records instead of failing. Default: strict.",
+    )
     return p.parse_args()
 
 
@@ -204,6 +232,7 @@ def main() -> int:
         output=args.output,
         threshold=args.threshold,
         max_per_task=args.max_per_task,
+        allow_skip_malformed=args.allow_skip_malformed,
     )
     return 0
 

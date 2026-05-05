@@ -7,15 +7,14 @@ Folder mapping per data/curie/README.md verbatim:
 DFT-S/P/C distinction per data/curie/colabs/curie_run_eval.ipynb cell 16:
   field_name should be one of "structure_metadata", "dft_metadata", or "code".
 
-Stage 3.5: load_curie_task now reads from data/curie/splits/{split}.jsonl when
-present (built by scripts/build_splits.py). Backward compat: if splits files
-do not exist and split == "test", falls back to loading all records as the
-test set (legacy behavior with a warning).
+Stage 3.5: load_curie_task reads exclusively from data/curie/splits/{split}.jsonl
+(built by scripts/build_splits.py). Every split — including "test" — hard-fails
+with FileNotFoundError when the splits file is missing. There is no
+all-records-as-test path.
 """
 from __future__ import annotations
 
 import json
-import warnings
 from pathlib import Path
 from typing import Any
 
@@ -78,62 +77,16 @@ def _load_from_splits(task_id: str, split: str) -> datasets.Dataset:
     return datasets.Dataset.from_list(rows)
 
 
-def _load_all_records(task_id: str) -> datasets.Dataset:
-    """Legacy loader: all per-task records as one dataset (used for test fallback)."""
-    folder, dft_field = TASK_MAP[task_id]
-    folder_path = _DATA_ROOT / folder
-    if not folder_path.is_dir():
-        raise FileNotFoundError(
-            f"Curie data folder missing at {folder_path}. "
-            "Initialize the submodule: git submodule update --init --recursive "
-            "and unzip data/curie/data/data.zip."
-        )
-    inputs_dir = folder_path / "inputs"
-    gt_dir = folder_path / "ground_truth"
-    if not inputs_dir.is_dir() or not gt_dir.is_dir():
-        raise FileNotFoundError(
-            f"Expected inputs/ and ground_truth/ subdirectories under {folder_path}"
-        )
-
-    difficulty_path = _DATA_ROOT / "difficulty_levels.json"
-    folder_difficulty = json.loads(difficulty_path.read_text())[folder]
-
-    rows: list[dict[str, Any]] = []
-    for input_file in sorted(inputs_dir.glob("*.json")):
-        record_id = input_file.stem
-        gt_file = gt_dir / f"{record_id}.json"
-        if not gt_file.is_file():
-            raise FileNotFoundError(
-                f"Missing ground truth for {record_id} at {gt_file}"
-            )
-        input_data = json.loads(input_file.read_text())
-        gt_data = json.loads(gt_file.read_text())
-
-        info: dict[str, Any] = {
-            "record_id": record_id,
-            "task_id": task_id,
-            "difficulty": folder_difficulty[record_id],
-            "dft_field": dft_field,
-        }
-        rows.append({
-            "prompt": [{"role": "user", "content": input_data["text"]}],
-            "answer": json.dumps(gt_data),
-            "info": info,
-        })
-    return datasets.Dataset.from_list(rows)
-
-
 def load_curie_task(task_id: str, split: str) -> datasets.Dataset:
     """Load CURIE benchmark records for the given task_id and split.
 
-    Stage 3.5: split must be one of "train", "val", "test". When the
-    corresponding splits/{split}.jsonl exists, returns the partitioned subset.
-    Backward-compat fallback: if splits files don't exist and split == "test",
-    returns the legacy all-records-as-test dataset (with warning).
+    `split` must be one of "train", "val", "test" and the corresponding
+    `data/curie/splits/{split}.jsonl` file must exist (built by
+    `scripts/build_splits.py`).
 
     Raises:
         ValueError: task_id not in TASK_MAP, or split not in {"train","val","test"}.
-        FileNotFoundError: submodule missing, or split is "train"/"val" without splits files.
+        FileNotFoundError: split file is missing for any split, including "test".
     """
     if task_id not in TASK_MAP:
         raise ValueError(
@@ -145,19 +98,9 @@ def load_curie_task(task_id: str, split: str) -> datasets.Dataset:
         )
 
     splits_file = _SPLITS_DIR / f"{split}.jsonl"
-    if splits_file.exists():
-        return _load_from_splits(task_id, split)
-
-    if split == "test":
-        warnings.warn(
-            f"Splits file {splits_file} does not exist; falling back to "
-            f"all-records-as-test (legacy behavior). "
-            f"Run: uv run python scripts/build_splits.py",
-            stacklevel=2,
+    if not splits_file.exists():
+        raise FileNotFoundError(
+            f"Splits file {splits_file} does not exist. "
+            f"Run: uv run python scripts/build_splits.py before loading split={split!r}."
         )
-        return _load_all_records(task_id)
-
-    raise FileNotFoundError(
-        f"Splits file {splits_file} does not exist. "
-        f"Run: uv run python scripts/build_splits.py before loading split={split!r}."
-    )
+    return _load_from_splits(task_id, split)

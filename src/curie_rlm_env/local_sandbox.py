@@ -75,15 +75,16 @@ class _BulkDeleteResponse:
 
 
 def _import_docker() -> Any:
-    """Lazy-import the docker SDK with an actionable error if missing/unreachable."""
+    """Lazy-import the docker SDK with an actionable error if missing/unreachable.
+
+    There is no fallback to a hosted sandbox — local Docker is mandatory.
+    """
     try:
         import docker  # type: ignore[import-untyped]
     except ImportError as exc:  # pragma: no cover — environment-dependent
         raise RuntimeError(
             "LocalDockerSandboxClient requires the `docker` Python package. "
-            "Install with `uv pip install docker`, or set "
-            "CURIE_SANDBOX_BACKEND=prime to use the hosted sandbox (which "
-            "requires PRIME_API_KEY)."
+            "Install with `uv pip install docker`."
         ) from exc
     try:
         client = docker.from_env()
@@ -91,8 +92,7 @@ def _import_docker() -> Any:
     except Exception as exc:  # pragma: no cover — environment-dependent
         raise RuntimeError(
             f"Local Docker daemon unreachable ({type(exc).__name__}: {exc}). "
-            "Start the Docker daemon, or set CURIE_SANDBOX_BACKEND=prime to use "
-            "the hosted sandbox (which requires PRIME_API_KEY)."
+            "Start the Docker daemon."
         ) from exc
     return client
 
@@ -395,19 +395,19 @@ class LocalDockerSandboxClient:
 
 _BACKEND_ENV = "CURIE_SANDBOX_BACKEND"
 _BACKEND_LOCAL = "local_docker"
-_BACKEND_PRIME = "prime"
-_VALID_BACKENDS = {_BACKEND_LOCAL, _BACKEND_PRIME}
+_VALID_BACKENDS = {_BACKEND_LOCAL}
 
 
 def resolve_sandbox_backend() -> str:
-    """Return 'local_docker' (default) or 'prime'.
+    """Return 'local_docker' — the only supported backend.
 
-    Set CURIE_SANDBOX_BACKEND to override. Any value other than the two valid
-    backends raises ValueError so misconfiguration is loud, not silent.
+    There is no opt-in for the hosted Prime sandbox; PRIME_API_KEY is not a
+    local-training path. Set CURIE_SANDBOX_BACKEND=local_docker (or leave unset)
+    to be explicit. Any other value raises ValueError so misconfiguration is loud.
     """
     value = os.environ.get(_BACKEND_ENV, _BACKEND_LOCAL).strip().lower()
     if value not in _VALID_BACKENDS:
         raise ValueError(
-            f"Invalid {_BACKEND_ENV}={value!r}; expected one of {sorted(_VALID_BACKENDS)}"
+            f"Invalid {_BACKEND_ENV}={value!r}; only {_BACKEND_LOCAL!r} is supported"
         )
     return value

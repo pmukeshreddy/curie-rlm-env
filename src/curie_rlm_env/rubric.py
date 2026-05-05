@@ -83,8 +83,8 @@ class CurieRubric(vf.Rubric):
         return task or ""
 
     @staticmethod
-    def _safe_loads(text: str):
-        """Parse JSON-ish text. Returns None on failure (input-validation, not fallback)."""
+    def _safe_loads_pred(text: str):
+        """Parse a *prediction* string. None == invalid prediction → caller returns 0."""
         if not text:
             return None
         try:
@@ -92,7 +92,24 @@ class CurieRubric(vf.Rubric):
         except (ValueError, TypeError):
             return None
 
+    @staticmethod
+    def _loads_ref(answer: str, task_id: str):
+        """Parse a *reference* string. Strict: malformed reference raises ValueError."""
+        if not isinstance(answer, str) or not answer:
+            raise ValueError(
+                f"CurieRubric[{task_id}]: reference answer is empty or not a string"
+            )
+        try:
+            return json5.loads(answer)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(
+                f"CurieRubric[{task_id}]: malformed reference JSON: {exc}"
+            ) from exc
+
     # ------- Headline reward funcs -----------------------------------------
+    # Strict semantics:
+    #   * Invalid prediction → return 0.0 silently (model's fault).
+    #   * Invalid / missing reference → raise ValueError (data/infra fault).
 
     async def _llmsim_reward(self, prompt, completion, answer, state, task, info, **kwargs) -> float:
         task_id = self._task_id(info, task)
@@ -100,14 +117,12 @@ class CurieRubric(vf.Rubric):
             return 0.0
         if self._judge_client is None:
             raise ValueError(f"LLMSim for {task_id} requires judge_client; got None")
+        json_ref = self._loads_ref(answer, task_id)  # reference issues raise
         pred_text = self._extract_pred(completion, state)
         if not pred_text or not pred_text.strip():
             return 0.0
-        json_pred = self._safe_loads(pred_text)
+        json_pred = self._safe_loads_pred(pred_text)
         if json_pred is None:
-            return 0.0
-        json_ref = self._safe_loads(answer)
-        if json_ref is None:
             return 0.0
         if not isinstance(json_pred, list):
             json_pred = [json_pred]
@@ -121,12 +136,22 @@ class CurieRubric(vf.Rubric):
         task_id = self._task_id(info, task)
         if task_id not in _GEOMETRIC_TASKS:
             return 0.0
+        ref_box = self._loads_ref(answer, task_id)
+        if not isinstance(ref_box, dict):
+            raise ValueError(
+                f"CurieRubric[{task_id}]: reference must be a JSON object; got {type(ref_box).__name__}"
+            )
+        for key in ("W", "S", "E", "N"):
+            if key not in ref_box:
+                raise ValueError(
+                    f"CurieRubric[{task_id}]: reference missing required field {key!r}"
+                )
+
         pred_text = self._extract_pred(completion, state)
         if not pred_text.strip():
             return 0.0
-        pred_box = self._safe_loads(pred_text)
-        ref_box = self._safe_loads(answer)
-        if not isinstance(pred_box, dict) or not isinstance(ref_box, dict):
+        pred_box = self._safe_loads_pred(pred_text)
+        if not isinstance(pred_box, dict):
             return 0.0
         try:
             return float(iou(
@@ -134,12 +159,28 @@ class CurieRubric(vf.Rubric):
                 [ref_box["W"], ref_box["S"], ref_box["E"], ref_box["N"]],
             ))
         except (KeyError, TypeError):
+            # Pred missing one of W/S/E/N or non-numeric → invalid prediction → 0.
             return 0.0
 
     async def _idr_reward(self, prompt, completion, answer, state, task, info, **kwargs) -> float:
         task_id = self._task_id(info, task)
         if task_id not in _STRUCTURAL_TASKS:
             return 0.0
+        ref_obj = self._loads_ref(answer, task_id)
+        if not isinstance(ref_obj, dict):
+            raise ValueError(
+                f"CurieRubric[{task_id}]: reference must be a JSON object; got {type(ref_obj).__name__}"
+            )
+        if "sequence" not in ref_obj:
+            raise ValueError(
+                f"CurieRubric[{task_id}]: reference missing required field 'sequence'"
+            )
+        ref_seq = ref_obj["sequence"]
+        if not isinstance(ref_seq, str) or not ref_seq:
+            raise ValueError(
+                f"CurieRubric[{task_id}]: reference 'sequence' must be a non-empty string"
+            )
+
         pred_text = self._extract_pred(completion, state)
         if not pred_text.strip():
             return 0.0
@@ -152,15 +193,9 @@ class CurieRubric(vf.Rubric):
                 break
         if not pred_seq:
             pred_seq = pred_text.strip()
-        ref_obj = self._safe_loads(answer)
-        if not isinstance(ref_obj, dict):
-            return 0.0
-        ref_seq = ref_obj.get("sequence", "")
-        if not isinstance(ref_seq, str) or not ref_seq:
-            return 0.0
         result = id_r(pred_seq, ref_seq)
         score = result["identity_ratio"]
-        if isinstance(score, str):  # "Zero length alignment" / "Zero length sequences"
+        if isinstance(score, str):  # "Zero length alignment" / "Zero length sequences" → invalid pred
             return 0.0
         return float(score)
 
@@ -168,8 +203,12 @@ class CurieRubric(vf.Rubric):
         task_id = self._task_id(info, task)
         if task_id not in _FREEFORM_TASKS:
             return 0.0
+        if not isinstance(answer, str) or not answer:
+            raise ValueError(
+                f"CurieRubric[{task_id}]: reference answer is empty or not a string"
+            )
         pred_text = self._extract_pred(completion, state)
-        if not pred_text.strip() or not answer:
+        if not pred_text.strip():
             return 0.0
         return float(rouge_l(pred_text, answer)["rougeLsum"] / 100.0)
 
@@ -177,8 +216,12 @@ class CurieRubric(vf.Rubric):
         task_id = self._task_id(info, task)
         if task_id not in _FREEFORM_TASKS:
             return 0.0
+        if not isinstance(answer, str) or not answer:
+            raise ValueError(
+                f"CurieRubric[{task_id}]: reference answer is empty or not a string"
+            )
         pred_text = self._extract_pred(completion, state)
-        if not pred_text.strip() or not answer:
+        if not pred_text.strip():
             return 0.0
         return float(bert_score_fn(pred_text, answer)["bert_f1"])
 

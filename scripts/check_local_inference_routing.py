@@ -1,9 +1,9 @@
 """Diagnostic — verify CurieRLMEnv routes rollouts locally (no prime_tunnel).
 
 Reports presence (NOT values) of every env var that controls local inference
-routing, the override URL CurieRLMEnv would compute, and whether the resolved
-mode bypasses prime_tunnel. Exits 0 when local mode is active and 1 when the
-env worker would still hit the hosted-tunnel path (PRIME_API_KEY required).
+routing and the override URL CurieRLMEnv would compute. Local routing is the
+only supported mode; this script exits 0 when settings resolve cleanly and 1
+when CurieRLMEnv cannot be imported or the settings are misconfigured.
 
 Usage:
     PYTHONPATH=/workspace/curie-rlm-env/src \\
@@ -16,7 +16,6 @@ import sys
 
 
 _ROUTING_VARS = (
-    "CURIE_USE_PRIME_TUNNEL",
     "CURIE_LOCAL_INTERCEPTION_URL",
     "CURIE_LOCAL_INTERCEPTION_HOST",
     "CURIE_LOCAL_INTERCEPTION_PORT",
@@ -25,14 +24,12 @@ _ROUTING_VARS = (
     "INFERENCE_SERVER_API_KEY",
     "OPENAI_BASE_URL",
     "OPENAI_API_KEY",
-    "PRIME_API_KEY",
     "HF_TOKEN",
     "WANDB_API_KEY",
     "GEMINI_API_KEY",
 )
 
 _NON_SECRET_VARS = {
-    "CURIE_USE_PRIME_TUNNEL",
     "CURIE_LOCAL_INTERCEPTION_URL",
     "CURIE_LOCAL_INTERCEPTION_HOST",
     "CURIE_LOCAL_INTERCEPTION_PORT",
@@ -61,21 +58,12 @@ def main() -> int:
         print(f"  ERROR: failed to import curie_rlm_env.env: {e}", file=sys.stderr)
         return 1
 
-    settings = resolve_local_interception_settings()
-    if settings is None:
-        print("  mode=PRIME_TUNNEL  (CURIE_USE_PRIME_TUNNEL is set)")
-        print("  PRIME_API_KEY is REQUIRED in this mode.")
-        prime_present = bool(os.environ.get("PRIME_API_KEY"))
-        print(f"  PRIME_API_KEY present? {prime_present}")
-        print()
-        print("Importing CurieRLMEnv class symbol...")
-        from curie_rlm_env.env import CurieRLMEnv  # noqa: F401
-        print("  curie_rlm_env.env.CurieRLMEnv import OK")
-        print()
-        print("Routing summary: hosted prime_tunnel mode (NOT local).")
+    try:
+        settings = resolve_local_interception_settings()
+    except ValueError as exc:
+        print(f"  ERROR: {exc}", file=sys.stderr)
         return 1
 
-    print(f"  mode=LOCAL  (no prime_tunnel; PRIME_API_KEY NOT required)")
     print(f"  override_url={settings['override_url']!r}")
     print(f"  host={settings['host']}")
     print(f"  port={settings['port']}{'  (auto-assigned at first rollout)' if settings['auto_port'] else ''}")
@@ -83,11 +71,15 @@ def main() -> int:
 
     print()
     print("Importing CurieRLMEnv class symbol...")
-    from curie_rlm_env.env import CurieRLMEnv  # noqa: F401
+    try:
+        from curie_rlm_env.env import CurieRLMEnv  # noqa: F401
+    except Exception as exc:
+        print(f"  IMPORT FAILED: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
     print("  curie_rlm_env.env.CurieRLMEnv import OK")
 
     print()
-    print("Routing summary: local-only mode is active.")
+    print("Routing summary: local-only mode (the only supported mode).")
     print("  Sandbox sub-LLM callbacks → env worker interception server at")
     if settings["auto_port"]:
         print(f"    http://{settings['host']}:<auto_port>  (port set after server bind)")
