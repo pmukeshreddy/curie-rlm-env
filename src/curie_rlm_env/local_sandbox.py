@@ -321,10 +321,13 @@ class LocalDockerSandboxClient:
         try:
             await asyncio.to_thread(_put)
         except Exception as exc:
+            _dbg(f"upload FAILED id={sandbox_id} err={type(exc).__name__}: {exc}")
             raise UploadTimeoutError(
                 f"Local upload of {local_path} → {sandbox_id}:{remote_path} failed: {exc}"
             ) from exc
-        return {"path": remote_path, "size": local.stat().st_size}
+        size = local.stat().st_size
+        _dbg(f"upload OK id={sandbox_id} {remote_path!r} size={size}B")
+        return {"path": remote_path, "size": size}
 
     async def download_file(
         self,
@@ -332,6 +335,7 @@ class LocalDockerSandboxClient:
         remote_path: str,
         local_path: str,
     ) -> None:
+        _dbg(f"download id={sandbox_id} {remote_path!r} -> {local_path!r}")
         container = self._container(sandbox_id)
 
         def _get() -> None:
@@ -397,19 +401,26 @@ class LocalDockerSandboxClient:
         working_dir: Optional[str] = None,
         poll_interval: int = 3,
     ) -> _CommandResponse:
+        _dbg(
+            f"bg_job id={sandbox_id} timeout={timeout} wd={working_dir!r} "
+            f"cmd={_short(command, 200)!r}"
+        )
         # Local Docker doesn't have a dedicated background-job API; just exec
         # synchronously within the timeout and translate timeouts.
         try:
-            return await self.execute_command(
+            result = await self.execute_command(
                 sandbox_id,
                 command,
                 timeout=timeout,
                 working_dir=working_dir,
             )
         except CommandTimeoutError as exc:
+            _dbg(f"bg_job TIMEOUT id={sandbox_id} after {timeout}s")
             raise SandboxTimeoutError(
                 f"Background job in {sandbox_id} exceeded {timeout}s"
             ) from exc
+        _dbg(f"bg_job DONE id={sandbox_id} exit={result.exit_code}")
+        return result
 
     # ------------------------------------------------------------------ teardown
     def teardown(self, wait: bool = True) -> None:
