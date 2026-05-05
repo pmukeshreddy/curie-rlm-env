@@ -3,14 +3,14 @@
 Quote from `src/curie_rlm_env/continual.py`:
 `Phase 2: 70% retrieval current tasks + 30% Phase 1 replay.`
 
-Private local research project implementing Google CURIE scientific long-context tasks with Recursive Language Models. The policy model is Qwen3.5-7B. The environment inherits the official `verifiers.envs.experimental.rlm_env.RLMEnv`; recursion, long-context execution, and sandboxed code run through Prime/verifiers.
+Private local research project implementing Google CURIE scientific long-context tasks with Recursive Language Models. The default policy model is `Qwen/Qwen3-8B`. The earlier `Qwen/Qwen3.5-7B-Instruct` was removed because it is not a valid Hugging Face repo (no Qwen3.5 family exists on HF — only Qwen2.5 and Qwen3); override the default at the prime-rl CLI with `--model.name <hf_repo>` if needed. The environment inherits the official `verifiers.envs.experimental.rlm_env.RLMEnv`; recursion, long-context execution, and sandboxed code run through Prime/verifiers.
 
 ## Locked Stack
 
 - `verifiers` for `RLMEnv`, `RubricGroup`, `JudgeRubric`, `SandboxMixin`, and RLM monitor rubrics
 - `prime-rl` installed separately on the GPU pod for Stage 5 training
 - Python `~=3.12.0`
-- Qwen3.5-7B policy model
+- `Qwen/Qwen3-8B` policy model (default; override at the prime-rl CLI with `--model.name <hf_repo>`)
 - No Environment Hub dependency for local research runs
 
 ## Pipeline

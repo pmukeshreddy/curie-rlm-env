@@ -25,7 +25,7 @@ keep_last = 2
 
 [model]
 # OVERRIDDEN at CLI to stalled continual Phase 1 checkpoint via --model.name
-name = "Qwen/Qwen3.5-7B-Instruct"
+name = "Qwen/Qwen3-8B"
 
 [data]
 path = "outputs/rft/high_reward_rollouts.jsonl"

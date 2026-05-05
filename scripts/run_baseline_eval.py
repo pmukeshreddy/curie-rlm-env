@@ -35,7 +35,7 @@ def parse_args() -> argparse.Namespace:
         help="Output JSON path (e.g. results/baseline_qwen3_5_7b.json)",
     )
     p.add_argument(
-        "--model", default="Qwen/Qwen3.5-7B",
+        "--model", default="Qwen/Qwen3-8B",
         help="Model name passed to the inference server.",
     )
     p.add_argument(

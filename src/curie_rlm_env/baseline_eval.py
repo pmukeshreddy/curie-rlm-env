@@ -204,7 +204,7 @@ async def _run_one_rollout(
 async def run_baseline(
     qwen_endpoint: str,
     output_path: Path | str,
-    model: str = "Qwen/Qwen3.5-7B",
+    model: str = "Qwen/Qwen3-8B",
     max_concurrency: int = 4,
     sampling_args: Optional[dict[str, Any]] = None,
     progress: Optional[Callable[[str, int, int], None]] = None,

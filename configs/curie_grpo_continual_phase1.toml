@@ -23,7 +23,7 @@ interval = 25
 keep_last = 3
 
 [model]
-name = "Qwen/Qwen3.5-7B-Instruct"
+name = "Qwen/Qwen3-8B"
 
 [orchestrator]
 batch_size = 64

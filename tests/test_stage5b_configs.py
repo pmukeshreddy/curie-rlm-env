@@ -121,6 +121,29 @@ def test_no_config_uses_invalid_model_ac_true():
         assert invalid_model_ac not in code, f"{path.name} uses invalid Prime-RL model.ac"
 
 
+def test_no_config_or_src_uses_invalid_qwen3_5_model_id():
+    src_dir = _PROJECT_ROOT / "src"
+    targets = list(_CONFIGS.glob("*.toml")) + list(src_dir.rglob("*.py"))
+    for path in targets:
+        text = path.read_text()
+        assert "Qwen/Qwen3.5" not in text, (
+            f"{path.relative_to(_PROJECT_ROOT)} still references invalid Qwen/Qwen3.5* HF repo"
+        )
+
+
+def test_continual_grpo_configs_use_qwen3_8b():
+    for name in _CFG_NAMES:
+        cfg = _load_toml(name)
+        assert cfg["model"]["name"] == "Qwen/Qwen3-8B", (
+            f"{name} should default to Qwen/Qwen3-8B; got {cfg['model']['name']!r}"
+        )
+
+
+def test_baseline_eval_default_model_is_qwen3_8b():
+    src = (_PROJECT_ROOT / "src" / "curie_rlm_env" / "baseline_eval.py").read_text()
+    assert 'model: str = "Qwen/Qwen3-8B"' in src
+
+
 def test_continual_activation_checkpointing_uses_trainer_model_ac():
     # Prime-RL expects activation checkpointing under trainer.model.ac.
     for name in _CFG_NAMES:

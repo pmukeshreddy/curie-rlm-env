@@ -43,7 +43,7 @@ def parse_args() -> argparse.Namespace:
                    help="Output JSON path")
     p.add_argument("--n-rollouts", type=int, default=5,
                    help="Rollouts per task (default 5)")
-    p.add_argument("--model", default="Qwen/Qwen3.5-7B-Instruct")
+    p.add_argument("--model", default="Qwen/Qwen3-8B")
     return p.parse_args()
 
 

@@ -22,7 +22,7 @@ interval = 25
 keep_last = 3
 
 [model]
-name = "Qwen/Qwen3.5-7B-Instruct"  # continual Phase 2 OVERRIDDEN at CLI to continual Phase 1 ckpt path
+name = "Qwen/Qwen3-8B"  # continual Phase 2 OVERRIDDEN at CLI to continual Phase 1 ckpt path
 
 [orchestrator]
 batch_size = 64
