@@ -65,27 +65,36 @@ _ANSWER_FORMAT_HINT: dict[str, str] = {
 }
 
 _TASK_PROMPT_TEMPLATE = """\
-You are answering a CURIE benchmark task ({task_id}, difficulty={difficulty}).
+/no_think
 
-The full long-context input for this task is in `context.txt` in your current \
-working directory. Your job is to read it, work through it, and produce a \
-final answer.
+CURIE task: {task_id} (difficulty={difficulty}).
 
-Recommended workflow:
-  1. Inspect the input. e.g. in the Python REPL: \
-`text = open("context.txt").read(); print(len(text)); print(text[:2000])`.
-  2. The input contains the long source material followed by a specific task \
-question. Identify the question.
-  3. Use `llm_batch()` to delegate semantic sub-tasks (summarization, \
-extraction, classification) — prefer parallel calls. Keep each sub-prompt \
-focused on a small slice of the text.
-  4. Combine the sub-results in the REPL, then write your final answer.
+You CANNOT see the input directly. The long-context input is on disk at \
+`context.txt` in your working directory. The ONLY way to read it is by \
+calling `call_python_repl`. Any attempt to answer without first reading \
+`context.txt` via the REPL is invalid — you literally have not seen the \
+question yet. Free-text answers without tool calls will be scored as zero.
 
-Expected answer format for {task_id}: {answer_format}
+REQUIRED first action: call `call_python_repl` with code that reads the \
+input. For example:
 
-When (and only when) the final answer is ready, write:
-    answer["content"] = <your answer string>
+    text = open("context.txt").read()
+    print("LENGTH:", len(text))
+    print(text[:3000])
+
+Then continue calling `call_python_repl` (and `llm_batch` for semantic \
+sub-tasks like summarization or extraction — use parallel calls when \
+possible) until you have the final answer.
+
+Answer format for {task_id}: {answer_format}
+
+To submit, call `call_python_repl` once more with:
+
+    answer["content"] = <your final answer as a string>
     answer["ready"] = True
+
+The rollout ends as soon as `answer["ready"] = True`. Do not write the \
+answer outside `answer["content"]` — it will not be scored.
 """
 
 
