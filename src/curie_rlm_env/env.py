@@ -140,6 +140,16 @@ class CurieRLMEnv(RLMEnv):
         super().__init__(
             dataset=dataset,
             rubric=rubric,
+            # Python REPL — matches the task-prompt examples in datasets.py
+            # (`open("context.txt").read()` etc) and keeps Qwen3 away from the
+            # nested-quote bash failures we saw in the first proper rollout
+            # (`bash: -c: line 12: unexpected EOF while looking for matching "`).
+            repl_language="python",
+            # Cap root-model turns so rollouts that loop without setting
+            # answer["ready"]=True don't burn 40+ turns / 100k+ tokens before
+            # the orchestrator gives up. 12 is enough for read-context →
+            # 2-3 chunked llm_batch passes → write-answer.
+            max_turns=12,
             sub_llm_max_turns=cfg["rlm_env"]["sub_llm_max_turns"],
             sub_max_completion_tokens=cfg["rlm_env"]["sub_max_completion_tokens"],
             sandbox_timeout_minutes=cfg["sandbox"]["sandbox_timeout_minutes"],

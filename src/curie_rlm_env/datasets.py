@@ -70,31 +70,34 @@ _TASK_PROMPT_TEMPLATE = """\
 CURIE task: {task_id} (difficulty={difficulty}).
 
 You CANNOT see the input directly. The long-context input is on disk at \
-`context.txt` in your working directory. The ONLY way to read it is by \
-calling `call_python_repl`. Any attempt to answer without first reading \
-`context.txt` via the REPL is invalid — you literally have not seen the \
-question yet. Free-text answers without tool calls will be scored as zero.
+`context.txt` in your working directory (Python's cwd inside the REPL). \
+The ONLY way to read it is by calling `call_python_repl`. Free-text answers \
+without tool calls will be scored as zero.
 
-REQUIRED first action: call `call_python_repl` with code that reads the \
-input. For example:
+You have a HARD BUDGET of 12 root-model turns. Plan accordingly:
+  Turn 1: read context.txt and identify the task question.
+  Turns 2–4: use `llm_batch([prompt1, prompt2, ...])` in parallel to extract \
+or summarize parts of the input as needed.
+  Turns 5–10: combine results, do any final analysis in the REPL.
+  Turn 11–12: SUBMIT (see below). If you are running out of turns, write your \
+best partial answer and submit anyway — submitting a guess is strictly \
+better than not submitting.
+
+REQUIRED first call (copy-paste, then continue from there):
 
     text = open("context.txt").read()
     print("LENGTH:", len(text))
     print(text[:3000])
 
-Then continue calling `call_python_repl` (and `llm_batch` for semantic \
-sub-tasks like summarization or extraction — use parallel calls when \
-possible) until you have the final answer.
-
 Answer format for {task_id}: {answer_format}
 
-To submit, call `call_python_repl` once more with:
+TO SUBMIT, call `call_python_repl` with EXACTLY:
 
     answer["content"] = <your final answer as a string>
     answer["ready"] = True
 
-The rollout ends as soon as `answer["ready"] = True`. Do not write the \
-answer outside `answer["content"]` — it will not be scored.
+The rollout ends the moment `answer["ready"] = True`. Do not write the \
+answer in chat — only `answer["content"]` is scored.
 """
 
 
