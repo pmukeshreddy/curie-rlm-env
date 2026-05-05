@@ -189,3 +189,78 @@ def test_datasets_module_does_not_warn_about_legacy_fallback():
     )
     for phrase in ("legacy fallback", "Backward-compat fallback", "Backward compat fallback"):
         assert phrase not in src, f"datasets.py still mentions {phrase!r}"
+
+
+# ---------------------------------------------------------------------------
+# RLM-shaped dataset rows: long input → info["context"], short prompt
+# ---------------------------------------------------------------------------
+
+
+def _mk_minimal_split_entry(task_id: str = "DFT-C") -> dict:
+    return {
+        "task_id": task_id,
+        "record_id": "rec_dummy",
+        "input": "x" * 200_000,  # ~50k tokens of long input
+        "ground_truth": {"answer": "stub"},
+    }
+
+
+def test_row_puts_long_input_in_context_not_prompt():
+    """RLM contract: long input lives in info['context'], NOT in prompt[0].content.
+
+    Stuffing the input into the user prompt would defeat RLM (the root model
+    would see all 50k tokens at once). RLMEnv writes info['context'] to
+    <rlm_fs_root>/context.txt inside the sandbox so the model reads it via the
+    REPL.
+    """
+    from curie_rlm_env.datasets import _row_from_split_entry
+
+    entry = _mk_minimal_split_entry("DFT-C")
+    folder_difficulty = {entry["record_id"]: "medium"}
+    row = _row_from_split_entry(entry, "DFT-C", "code", folder_difficulty)
+
+    user_text = row["prompt"][0]["content"]
+    assert len(user_text) < 4_000, (
+        f"task prompt should stay short for RLM; got {len(user_text)} chars"
+    )
+    assert "x" * 1000 not in user_text, "long input must NOT be inlined in the prompt"
+
+    info = row["info"]
+    assert info["context"] == entry["input"], (
+        "info['context'] must carry the full long input verbatim "
+        "(RLMEnv writes it to <rlm_fs_root>/context.txt)"
+    )
+
+
+def test_row_prompt_mentions_context_file_and_repl_workflow():
+    """The short prompt must tell the model where the input is and how to read it."""
+    from curie_rlm_env.datasets import _row_from_split_entry
+
+    entry = _mk_minimal_split_entry("HFE")
+    folder_difficulty = {entry["record_id"]: "easy"}
+    row = _row_from_split_entry(entry, "HFE", None, folder_difficulty)
+
+    user_text = row["prompt"][0]["content"]
+    assert "context.txt" in user_text
+    assert "answer" in user_text  # tells model how to set the final answer
+    assert "ready" in user_text   # tells model how to signal completion
+
+
+def test_row_prompt_has_per_task_answer_format_hint():
+    """Each task family gets a format-specific hint matching the rubric."""
+    from curie_rlm_env.datasets import _row_from_split_entry
+
+    expectations = {
+        "DFT-S": "JSON list",
+        "BIOGR": '"W"',
+        "PDB": "FASTA",
+        "HFE": "Free-form",
+    }
+    for task_id, must_contain in expectations.items():
+        entry = _mk_minimal_split_entry(task_id)
+        folder_difficulty = {entry["record_id"]: "medium"}
+        row = _row_from_split_entry(entry, task_id, None, folder_difficulty)
+        text = row["prompt"][0]["content"]
+        assert must_contain in text, (
+            f"prompt for {task_id} should mention {must_contain!r}; got:\n{text}"
+        )

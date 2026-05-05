@@ -11,6 +11,18 @@ Stage 3.5: load_curie_task reads exclusively from data/curie/splits/{split}.json
 (built by scripts/build_splits.py). Every split — including "test" — hard-fails
 with FileNotFoundError when the splits file is missing. There is no
 all-records-as-test path.
+
+RLM input shape (the whole point of this project):
+  CURIE inputs are 15k+ words (~20-40k+ tokens). Stuffing them into the root
+  prompt defeats Recursive Language Models — the root model would never have
+  the chance to recurse, and a single rollout would blow past Qwen3-8B's 40,960
+  context. Instead, each row's `info["context"]` carries the full long input;
+  RLMEnv writes it to ``<rlm_fs_root>/context.txt`` inside the sandbox before
+  the rollout starts (see verifiers/.../rlm_env.py:_write_builtin_context). The
+  REPL's cwd is rlm_fs_root, so the model reads via `open("context.txt").read()`
+  and uses `call_python_repl` + `llm_batch` to navigate/summarize chunks. The
+  visible `prompt` shrinks to a short task instruction (~200 tokens) — well
+  within any reasonable context window.
 """
 from __future__ import annotations
 
@@ -34,6 +46,57 @@ TASK_MAP: dict[str, tuple[str, str | None]] = {
     "GEO":   ("geo", None),
 }
 
+# Per-task answer-format hint appended to the prompt. Matches the rubric:
+#   - LLMSim retrieval (DFT-S/P, MPVE) → JSON list
+#   - IoU geometric (BIOGR)             → JSON dict {W,S,E,N}
+#   - ID_r structural (PDB)             → FASTA `>` line + sequence
+#   - Free-form (DFT-C, HFE, HFD, QECC_65, GEO) → plain text
+_ANSWER_FORMAT_HINT: dict[str, str] = {
+    "DFT-S": 'A JSON list of structure-metadata objects, e.g. `[{"key": "value", ...}, ...]`.',
+    "DFT-P": 'A JSON list of DFT-parameter objects, e.g. `[{"key": "value", ...}, ...]`.',
+    "MPVE":  'A JSON list of materials-property/value objects, e.g. `[{"name": "...", "value": ...}, ...]`.',
+    "BIOGR": 'A JSON object with the geographic bounding box: `{"W": <west>, "S": <south>, "E": <east>, "N": <north>}` (numbers).',
+    "PDB":   'A FASTA-format protein sequence: a `>` header line followed by the sequence on the next line.',
+    "DFT-C": "Free-form text or code as the input requests.",
+    "HFE":   "Free-form scientific explanation.",
+    "HFD":   "Free-form scientific description.",
+    "QECC_65": "Free-form answer to the quantum-error-correction question.",
+    "GEO":   "Free-form geological/geographical answer.",
+}
+
+_TASK_PROMPT_TEMPLATE = """\
+You are answering a CURIE benchmark task ({task_id}, difficulty={difficulty}).
+
+The full long-context input for this task is in `context.txt` in your current \
+working directory. Your job is to read it, work through it, and produce a \
+final answer.
+
+Recommended workflow:
+  1. Inspect the input. e.g. in the Python REPL: \
+`text = open("context.txt").read(); print(len(text)); print(text[:2000])`.
+  2. The input contains the long source material followed by a specific task \
+question. Identify the question.
+  3. Use `llm_batch()` to delegate semantic sub-tasks (summarization, \
+extraction, classification) — prefer parallel calls. Keep each sub-prompt \
+focused on a small slice of the text.
+  4. Combine the sub-results in the REPL, then write your final answer.
+
+Expected answer format for {task_id}: {answer_format}
+
+When (and only when) the final answer is ready, write:
+    answer["content"] = <your answer string>
+    answer["ready"] = True
+"""
+
+
+def _build_task_prompt(task_id: str, difficulty: str) -> str:
+    return _TASK_PROMPT_TEMPLATE.format(
+        task_id=task_id,
+        difficulty=difficulty,
+        answer_format=_ANSWER_FORMAT_HINT[task_id],
+    )
+
+
 VALID_SPLITS = frozenset({"train", "val", "test"})
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -44,16 +107,26 @@ _SPLITS_DIR = _PROJECT_ROOT / "data" / "curie" / "splits"
 def _row_from_split_entry(
     entry: dict[str, Any], task_id: str, dft_field: str | None, folder_difficulty: dict[str, str]
 ) -> dict[str, Any]:
-    """Build a Dataset row from a splits-file entry."""
+    """Build a Dataset row from a splits-file entry.
+
+    Long input goes into `info["context"]` (RLMEnv writes it to
+    ``<rlm_fs_root>/context.txt`` inside the sandbox); the visible prompt
+    shrinks to a short task instruction.
+    """
     record_id = entry["record_id"]
+    difficulty = folder_difficulty[record_id]
     info: dict[str, Any] = {
         "record_id": record_id,
         "task_id": task_id,
-        "difficulty": folder_difficulty[record_id],
+        "difficulty": difficulty,
         "dft_field": dft_field,
+        # RLMEnv contract: info["context"] (string) → /<rlm_fs_root>/context.txt
+        # inside the sandbox. The REPL's cwd is rlm_fs_root, so the model reads
+        # via `open("context.txt").read()`.
+        "context": entry["input"],
     }
     return {
-        "prompt": [{"role": "user", "content": entry["input"]}],
+        "prompt": [{"role": "user", "content": _build_task_prompt(task_id, difficulty)}],
         "answer": json.dumps(entry["ground_truth"]),
         "info": info,
     }
