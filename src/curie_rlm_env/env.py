@@ -17,7 +17,10 @@ Training quote from src/curie_rlm_env/continual.py:
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
+from typing import Optional, TypedDict
+from urllib.parse import urlparse
 
 import yaml
 import verifiers as vf
@@ -33,6 +36,86 @@ from .schema import validate_answer
 _CFG_PATH = (
     Path(__file__).resolve().parent.parent.parent / "config" / "safeguards.yaml"
 )
+
+# Local-inference routing env vars (bypass prime_tunnel for single-pod local training).
+# RLMEnv falls back to prime_tunnel.Tunnel() when its `_interception_url_override` is
+# unset (verifiers/envs/experimental/rlm_env.py:3445), which raises
+#   TunnelError("No API key configured. Set PRIME_API_KEY environment variable.")
+# from prime_tunnel/core/client.py:75. Setting the override skips that branch.
+_USE_PRIME_TUNNEL_ENV = "CURIE_USE_PRIME_TUNNEL"
+_INTERCEPTION_URL_ENV = "CURIE_LOCAL_INTERCEPTION_URL"
+_INTERCEPTION_HOST_ENV = "CURIE_LOCAL_INTERCEPTION_HOST"
+_INTERCEPTION_PORT_ENV = "CURIE_LOCAL_INTERCEPTION_PORT"
+_INTERCEPTION_BIND_ENV = "CURIE_LOCAL_INTERCEPTION_BIND"
+
+_DEFAULT_LOCAL_HOST = "127.0.0.1"
+_DEFAULT_LOCAL_BIND = "127.0.0.1"
+
+
+class _LocalInterceptionSettings(TypedDict):
+    override_url: Optional[str]
+    host: str
+    port: int
+    bind: str
+    auto_port: bool
+
+
+def _truthy(value: str | None) -> bool:
+    return (value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def resolve_local_interception_settings() -> Optional[_LocalInterceptionSettings]:
+    """Resolve sandbox→env-worker callback URL for local-only training.
+
+    Returns None when CURIE_USE_PRIME_TUNNEL=1 (caller wants the original prime_tunnel
+    behavior, which requires PRIME_API_KEY). Otherwise returns settings the caller
+    applies to the RLMEnv instance to bypass the tunnel.
+
+    Resolution order:
+      1. CURIE_USE_PRIME_TUNNEL=1                       → None (opt out)
+      2. CURIE_LOCAL_INTERCEPTION_URL=http://host:port  → use that exact URL, pin port
+      3. CURIE_LOCAL_INTERCEPTION_PORT=N                → http://HOST:N, pin port
+      4. (no port set)                                   → auto-assign port; URL is
+         http://HOST:<actual_port> after the interception server binds.
+
+    HOST defaults to 127.0.0.1; BIND defaults to 127.0.0.1 (set 0.0.0.0 if the sandbox
+    runs in a separate network namespace, e.g. docker bridge).
+    """
+    if _truthy(os.environ.get(_USE_PRIME_TUNNEL_ENV)):
+        return None
+    bind = os.environ.get(_INTERCEPTION_BIND_ENV, _DEFAULT_LOCAL_BIND)
+    explicit_url = os.environ.get(_INTERCEPTION_URL_ENV)
+    if explicit_url:
+        parsed = urlparse(explicit_url)
+        if parsed.port is None:
+            raise ValueError(
+                f"{_INTERCEPTION_URL_ENV}={explicit_url!r} must include a port"
+            )
+        return {
+            "override_url": explicit_url,
+            "host": parsed.hostname or _DEFAULT_LOCAL_HOST,
+            "port": parsed.port,
+            "bind": bind,
+            "auto_port": False,
+        }
+    host = os.environ.get(_INTERCEPTION_HOST_ENV, _DEFAULT_LOCAL_HOST)
+    port_env = os.environ.get(_INTERCEPTION_PORT_ENV)
+    if port_env:
+        port = int(port_env)
+        return {
+            "override_url": f"http://{host}:{port}",
+            "host": host,
+            "port": port,
+            "bind": bind,
+            "auto_port": False,
+        }
+    return {
+        "override_url": None,
+        "host": host,
+        "port": 0,
+        "bind": bind,
+        "auto_port": True,
+    }
 
 
 class CurieRLMEnv(RLMEnv):
@@ -75,6 +158,34 @@ class CurieRLMEnv(RLMEnv):
         self.task_id = task_id if task_id is not None else f"continual_phase_{continual_phase}"
         self.continual_phase = continual_phase
         self.seed = seed
+
+        settings = resolve_local_interception_settings()
+        if settings is None:
+            self._curie_local_inference = False
+            self._curie_local_host = _DEFAULT_LOCAL_HOST
+            self._curie_local_auto_port = False
+        else:
+            self._curie_local_inference = True
+            self._curie_local_host = settings["host"]
+            self._curie_local_auto_port = settings["auto_port"]
+            self._interception_bind_host = settings["bind"]
+            self.interception_port = settings["port"]
+            if settings["override_url"] is not None:
+                self._interception_url_override = settings["override_url"]
+
+    async def _setup_interception_and_register(
+        self, state: State, rollout_id: str
+    ) -> State:
+        if (
+            self._curie_local_inference
+            and self._curie_local_auto_port
+            and not self._interception_url_override
+        ):
+            await self._ensure_interception_server()
+            self._interception_url_override = (
+                f"http://{self._curie_local_host}:{self.interception_port}"
+            )
+        return await super()._setup_interception_and_register(state, rollout_id)
 
     @vf.stop
     async def answer_schema_valid(self, state: State) -> bool:

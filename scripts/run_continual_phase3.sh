@@ -2,10 +2,13 @@
 # Stage 5 Continual Phase 3 — geometric/structural current tasks with Phase 1+2 replay.
 # Quote from configs/curie_grpo_continual_phase3.toml:
 # "Phase 2 replay: DFT-S, DFT-P, MPVE."
+#
+# Local-only training: PRIME_API_KEY is NOT required (see run_continual_phase1.sh
+# header for the local-interception env-var contract).
 set -euo pipefail
 
 if [[ -z "${INFERENCE_SERVER_IP:-}" ]]; then
-    echo "ERROR: INFERENCE_SERVER_IP env var required" >&2
+    echo "ERROR: INFERENCE_SERVER_IP env var required (local prime-rl inference server address)" >&2
     exit 1
 fi
 if [[ -z "${GEMINI_API_KEY:-}" ]]; then
@@ -18,6 +21,8 @@ if [[ -z "${CONTINUAL_PHASE2_CKPT:-}" ]]; then
 fi
 
 export CURIE_JUDGE_CACHE=1
+export CURIE_LOCAL_INTERCEPTION_HOST="${CURIE_LOCAL_INTERCEPTION_HOST:-127.0.0.1}"
+export CURIE_LOCAL_INTERCEPTION_BIND="${CURIE_LOCAL_INTERCEPTION_BIND:-127.0.0.1}"
 ulimit -n 32000
 
 uv run rl @ configs/curie_grpo_continual_phase3.toml \

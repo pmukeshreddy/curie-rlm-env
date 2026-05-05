@@ -260,3 +260,159 @@ def test_retrieval_replay_scripts_enable_judge_cache():
         text = (_SCRIPTS / f"run_continual_phase{continual_phase}.sh").read_text()
         assert "GEMINI_API_KEY" in text
         assert "CURIE_JUDGE_CACHE=1" in text
+
+
+# ---------------------------------------------------------------------------
+# Local inference routing (no prime_tunnel)
+# ---------------------------------------------------------------------------
+
+import os
+import sys
+
+import pytest as _pytest
+
+
+def test_continual_scripts_do_not_hard_require_prime_api_key():
+    """No continual run script may hard-fail when PRIME_API_KEY is unset.
+
+    Documentation comments mentioning PRIME_API_KEY (e.g. "PRIME_API_KEY is NOT
+    required") are fine — what's forbidden is a guard that exits when it's missing.
+    """
+    forbidden_patterns = (
+        '${PRIME_API_KEY:-}',          # bash empty-default expansion in a guard
+        'PRIME_API_KEY env var required',
+        'PRIME_API_KEY is required',
+        'export PRIME_API_KEY=',
+    )
+    for continual_phase in (1, 2, 3):
+        path = _SCRIPTS / f"run_continual_phase{continual_phase}.sh"
+        text = path.read_text()
+        for pattern in forbidden_patterns:
+            assert pattern not in text, (
+                f"{path.name} appears to require PRIME_API_KEY ({pattern!r})"
+            )
+
+
+def test_readme_documents_prime_api_key_as_not_required_for_local():
+    """README must explicitly mark PRIME_API_KEY as NOT required for local training."""
+    readme = (_PROJECT_ROOT / "README.md").read_text()
+    assert "PRIME_API_KEY" in readme, "README must mention PRIME_API_KEY status"
+    not_required_phrases = (
+        "does not require `PRIME_API_KEY`",
+        "does NOT require `PRIME_API_KEY`",
+        "not require `PRIME_API_KEY`",
+        "PRIME_API_KEY is not required",
+        "PRIME_API_KEY` | Prime hosted tunnel",  # the "NOT required" table row
+    )
+    assert any(phrase in readme for phrase in not_required_phrases), (
+        "README must explicitly state that PRIME_API_KEY is not required for local training"
+    )
+
+
+def test_continual_scripts_set_local_interception_defaults():
+    """Each continual script must export local-routing host/bind defaults."""
+    for continual_phase in (1, 2, 3):
+        text = (_SCRIPTS / f"run_continual_phase{continual_phase}.sh").read_text()
+        assert "CURIE_LOCAL_INTERCEPTION_HOST" in text
+        assert "CURIE_LOCAL_INTERCEPTION_BIND" in text
+
+
+def _reset_routing_env(monkeypatch):
+    for name in (
+        "CURIE_USE_PRIME_TUNNEL",
+        "CURIE_LOCAL_INTERCEPTION_URL",
+        "CURIE_LOCAL_INTERCEPTION_HOST",
+        "CURIE_LOCAL_INTERCEPTION_PORT",
+        "CURIE_LOCAL_INTERCEPTION_BIND",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_resolve_local_interception_returns_local_mode_by_default(monkeypatch):
+    sys.path.insert(0, str(_PROJECT_ROOT / "src"))
+    from curie_rlm_env.env import resolve_local_interception_settings
+
+    _reset_routing_env(monkeypatch)
+    settings = resolve_local_interception_settings()
+    assert settings is not None
+    assert settings["host"] == "127.0.0.1"
+    assert settings["bind"] == "127.0.0.1"
+    assert settings["auto_port"] is True
+    assert settings["override_url"] is None  # built lazily after server bind
+
+
+def test_resolve_local_interception_opts_out_with_prime_tunnel_flag(monkeypatch):
+    sys.path.insert(0, str(_PROJECT_ROOT / "src"))
+    from curie_rlm_env.env import resolve_local_interception_settings
+
+    _reset_routing_env(monkeypatch)
+    monkeypatch.setenv("CURIE_USE_PRIME_TUNNEL", "1")
+    assert resolve_local_interception_settings() is None
+
+
+def test_resolve_local_interception_pins_port_when_set(monkeypatch):
+    sys.path.insert(0, str(_PROJECT_ROOT / "src"))
+    from curie_rlm_env.env import resolve_local_interception_settings
+
+    _reset_routing_env(monkeypatch)
+    monkeypatch.setenv("CURIE_LOCAL_INTERCEPTION_HOST", "10.0.0.5")
+    monkeypatch.setenv("CURIE_LOCAL_INTERCEPTION_PORT", "9099")
+    settings = resolve_local_interception_settings()
+    assert settings is not None
+    assert settings["host"] == "10.0.0.5"
+    assert settings["port"] == 9099
+    assert settings["auto_port"] is False
+    assert settings["override_url"] == "http://10.0.0.5:9099"
+
+
+def test_resolve_local_interception_explicit_url_takes_precedence(monkeypatch):
+    sys.path.insert(0, str(_PROJECT_ROOT / "src"))
+    from curie_rlm_env.env import resolve_local_interception_settings
+
+    _reset_routing_env(monkeypatch)
+    monkeypatch.setenv("CURIE_LOCAL_INTERCEPTION_URL", "http://my-host:7777/")
+    monkeypatch.setenv("CURIE_LOCAL_INTERCEPTION_HOST", "ignored.example")
+    monkeypatch.setenv("CURIE_LOCAL_INTERCEPTION_PORT", "1234")
+    settings = resolve_local_interception_settings()
+    assert settings is not None
+    assert settings["override_url"] == "http://my-host:7777/"
+    assert settings["host"] == "my-host"
+    assert settings["port"] == 7777
+
+
+def test_resolve_local_interception_url_without_port_rejected(monkeypatch):
+    sys.path.insert(0, str(_PROJECT_ROOT / "src"))
+    from curie_rlm_env.env import resolve_local_interception_settings
+
+    _reset_routing_env(monkeypatch)
+    monkeypatch.setenv("CURIE_LOCAL_INTERCEPTION_URL", "http://my-host")
+    with _pytest.raises(ValueError):
+        resolve_local_interception_settings()
+
+
+def test_check_local_inference_routing_script_compiles():
+    path = _SCRIPTS / "check_local_inference_routing.py"
+    assert path.is_file()
+    py_compile.compile(str(path), doraise=True)
+
+
+def test_continual_configs_still_use_qwen3_8b_after_routing_fix():
+    """Routing fix must not change the Qwen/Qwen3-8B default model id."""
+    for name in _CFG_NAMES:
+        cfg = _load_toml(name)
+        assert cfg["model"]["name"] == "Qwen/Qwen3-8B"
+
+
+def test_continual_configs_still_have_single_env_after_routing_fix():
+    for name in _CFG_NAMES:
+        cfg = _load_toml(name)
+        envs = cfg["orchestrator"]["train"]["env"]
+        assert len(envs) == 1
+        assert envs[0]["args"].get("continual_phase") in {1, 2, 3}
+        assert "task_id" not in envs[0]["args"]
+
+
+def test_trainer_model_ac_freq_one_still_present_after_routing_fix():
+    for name in _CFG_NAMES:
+        cfg = _load_toml(name)
+        assert cfg["trainer"]["model"]["ac"] == {"freq": 1}

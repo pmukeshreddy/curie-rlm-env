@@ -5,6 +5,45 @@ Quote from `src/curie_rlm_env/continual.py`:
 
 Private local research project implementing Google CURIE scientific long-context tasks with Recursive Language Models. The default policy model is `Qwen/Qwen3-8B`. The earlier `Qwen/Qwen3.5-7B-Instruct` was removed because it is not a valid Hugging Face repo (no Qwen3.5 family exists on HF — only Qwen2.5 and Qwen3); override the default at the prime-rl CLI with `--model.name <hf_repo>` if needed. The environment inherits the official `verifiers.envs.experimental.rlm_env.RLMEnv`; recursion, long-context execution, and sandboxed code run through Prime/verifiers.
 
+## Local inference routing (no Prime hosted tunnel required)
+
+Local single-pod training does NOT require `PRIME_API_KEY`. `CurieRLMEnv` resolves a sandbox→env-worker callback URL at startup and sets `RLMEnv._interception_url_override`, which bypasses the `prime_tunnel.Tunnel` code path that raises `TunnelError("No API key configured. Set PRIME_API_KEY environment variable.")`.
+
+Required env vars (local training):
+
+| Variable | Purpose | Required for |
+|---|---|---|
+| `INFERENCE_SERVER_IP` | Address of the local prime-rl inference server | Stage 5 continual training |
+| `HF_TOKEN` | Hugging Face auth for `Qwen/Qwen3-8B` download | First-time model fetch |
+| `WANDB_API_KEY` | W&B logging | Stage 5 (if W&B enabled) |
+| `GEMINI_API_KEY` | LLMSim judge for retrieval rewards | Continual Phases 2 and 3 only |
+
+NOT required for local training:
+
+| Variable | Purpose |
+|---|---|
+| `PRIME_API_KEY` | Prime hosted tunnel — only needed when `CURIE_USE_PRIME_TUNNEL=1` |
+
+Optional local-routing knobs (all have defaults):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `CURIE_LOCAL_INTERCEPTION_HOST` | `127.0.0.1` | Host portion of the sandbox→env-worker callback URL |
+| `CURIE_LOCAL_INTERCEPTION_PORT` | auto-assigned | Pin a fixed port; otherwise the URL is built after the interception server binds |
+| `CURIE_LOCAL_INTERCEPTION_BIND` | `127.0.0.1` | Bind interface; set `0.0.0.0` if the sandbox runs in a separate netns (e.g. docker bridge) |
+| `CURIE_LOCAL_INTERCEPTION_URL` | (composed) | Full override URL; takes precedence over HOST/PORT |
+| `INFERENCE_SERVER_API_KEY` | (none) | Local auth secret if your local inference server requires one |
+| `CURIE_USE_PRIME_TUNNEL` | unset | Set to `1` to opt back into the hosted-tunnel path (requires `PRIME_API_KEY`) |
+
+Verify routing:
+
+```bash
+PYTHONPATH=/workspace/curie-rlm-env/src \
+    uv run --project /workspace/prime-rl python scripts/check_local_inference_routing.py
+```
+
+Exits 0 in local mode, 1 in hosted-tunnel mode.
+
 ## Locked Stack
 
 - `verifiers` for `RLMEnv`, `RubricGroup`, `JudgeRubric`, `SandboxMixin`, and RLM monitor rubrics
