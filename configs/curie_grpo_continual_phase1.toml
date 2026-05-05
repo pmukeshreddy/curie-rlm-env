@@ -57,7 +57,14 @@ lr = 1e-6  # conservative for 7B + small data; tune up if reward gradient flat
 # which is below the CURIE prompt size (~41k tokens, observed prompt=40961 in
 # vLLM 400 errors). Extend via YaRN rope scaling — Qwen3 officially supports it
 # up to 128K context. factor=2.0 → effective max 81,920 tokens, comfortably
-# above CURIE prompts. max_model_len caps the served context window.
+# above CURIE prompts.
+#
+# `rope_scaling` is passed as a JSON-encoded *string* (not an inline TOML table)
+# because prime-rl's vllm_extra forwarder drops nested dict values; vLLM's CLI
+# expects `--rope-scaling` as a JSON string anyway. `hf_overrides` injects the
+# new max_position_embeddings into the model's config.json at load time, so
+# vLLM's pre-load validation accepts max_model_len=65536.
 [inference.vllm_extra]
 max_model_len = 65536
-rope_scaling = { rope_type = "yarn", factor = 2.0, original_max_position_embeddings = 40960 }
+rope_scaling = '{"rope_type":"yarn","factor":2.0,"original_max_position_embeddings":40960}'
+hf_overrides = '{"max_position_embeddings":65536,"rope_scaling":{"rope_type":"yarn","factor":2.0,"original_max_position_embeddings":40960}}'
