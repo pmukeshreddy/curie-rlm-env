@@ -1,0 +1,49 @@
+# Stage 5 — Continual CURIE-RLM Phase 3 (DPPO+KL with DR-GRPO advantages).
+#
+# Quote from src/curie_rlm_env/continual.py:
+#   "Phase 3: 60% geometric/structural current tasks + 20% Phase 1 replay"
+#   "+ 20% Phase 2 replay."
+#
+# Current tasks: BIOGR, PDB.
+# Phase 1 replay: DFT-C, HFE, HFD, QECC_65, GEO.
+# Phase 2 replay: DFT-S, DFT-P, MPVE.
+# Retrieval replay means LLMSim/Gemini and judge cache are still required.
+
+max_steps = 100
+seq_len = 16384
+
+[deployment]
+# TUNE PER POD AVAILABILITY
+
+[wandb]
+project = "curie-rlm"
+name = "continual_phase3_geometric_structural_replay_qwen3_5_7b"
+
+[ckpt]
+interval = 25
+keep_last = 3
+
+[model]
+name = "Qwen/Qwen3.5-7B-Instruct"  # OVERRIDDEN at CLI to phase2 ckpt path
+ac = true
+
+[orchestrator]
+batch_size = 64
+rollouts_per_example = 4  # Phase 2 retrieval replay keeps LLMSim in-loop
+
+[[orchestrator.train.env]]
+id = "curie-rlm-env"
+name = "continual_phase3_geometric_structural_with_replay"
+args = { phase = 3, split = "train", seed = 42 }
+
+[orchestrator.train.sampling]
+max_completion_tokens = 4096
+
+[trainer]
+# prime-rl defaults: kl_tau, dppo_mask_high, dppo_mask_low, adv_tau
+
+[trainer.optim]
+lr = 1e-6
+
+[inference.parallel]
+# TUNE PER POD AVAILABILITY

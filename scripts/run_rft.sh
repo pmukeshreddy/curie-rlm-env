@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Stage 5.5 — RFT contingency launcher.
-# Run only if Stage 5 phase1 stalls. See docs/STAGE_5_5_CONTINGENCY.md.
+# Run only if Stage 5 continual Phase 1 stalls. See docs/STAGE_5_5_CONTINGENCY.md.
 set -euo pipefail
 
 if [[ -z "${PHASE1_STALLED_CKPT:-}" ]]; then
@@ -28,7 +28,8 @@ uv run sft @ configs/curie_rft_phase1.toml \
 
 cat <<'MSG'
 
-RFT complete. To resume Stage 5 phase1 from the bootstrapped checkpoint:
+RFT complete. To resume Stage 5 continual Phase 1 from the bootstrapped checkpoint:
     export PHASE1_RESUME_CKPT=outputs/rft/step_<N>/
-    # then re-launch run_phase1.sh with --model.name override
+    OUTPUT_DIR=outputs/continual_phase1_rft_resume \
+        ./scripts/run_continual_phase1.sh --model.name "$PHASE1_RESUME_CKPT"
 MSG

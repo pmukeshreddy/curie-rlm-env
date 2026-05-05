@@ -1,51 +1,77 @@
-# curie-rlm-env — Curie Benchmark + Recursive Language Models + DPPO+KL (GRPO family)
+# curie-rlm-env — CURIE Benchmark + RLM + Continual DPPO+KL
 
-**100% private local research project.**  
-Strictly uses **Prime Intellect stack only**:
-- `verifiers` (RLMEnv + Rubric + PrimeSandbox)
-- `prime-rl` (GRPO trainer)
+Quote from `src/curie_rlm_env/continual.py`:
+`Phase 2: 70% retrieval current tasks + 30% Phase 1 replay.`
 
-**Policy model**: Qwen3.5-7B (or Qwen/Qwen3.5-7B-Instruct).  
-**No** Environment Hub. **No** `prime env init`. Everything stays 100% local.
+Private local research project implementing Google CURIE scientific long-context tasks with Recursive Language Models. The policy model is Qwen3.5-7B. The environment inherits the official `verifiers.envs.experimental.rlm_env.RLMEnv`; recursion, long-context execution, and sandboxed code run through Prime/verifiers.
 
-## Locked Pipeline (Stage 0–8 — non-negotiable)
-**Stage 0**: Safeguards + config (max_recursive_depth=1, deterministic-first rewards)  
-**Stage 1**: uv setup + Prime libraries  
-**Stage 2**: CurieRLMEnv inheriting official RLMEnv (Prime Sandboxes handle recursion/REPL/long-context)  
-**Stage 3**: Baseline evaluation (RLM vs non-RLM)  
-**Stage 3.5**: Baseline eval — Qwen3.5-7B + CurieRLMEnv on test split, no training. Establishes per-task floor.  
-**Stage 4 (SKIPPED)**: no public SFT trajectory data exists for RLM on Curie. Cold-start GRPO chosen.  
-**Stage 5**: RL post-training with prime-rl (DPPO+KL loss, DR-GRPO advantages — prime-rl's default in the GRPO family)  
-**Stage 5.5 (CONTINGENCY)**: RFT bootstrap from stalled phase1 checkpoint. Filters phase1's own rollouts above reward T (default 0.5), SFTs on them, resumes phase1 from RFT checkpoint. Run only if trigger fires. See docs/STAGE_5_5_CONTINGENCY.md.  
-**Stage 6 (SKIPPED)**: Originally "Mixing + online refinement". No concrete deliverable — async off-policy correction is handled internally by prime-rl (max_async_level=2 default). No mixing needed since SFT was skipped at Stage 4.  
-**Stage 7**: Final eval + ablations + report  
-**Stage 8**: Optional hub push (only when you decide)
+## Locked Stack
 
-## Curie Metrics (Locked — Verbatim from Paper + curie_run_eval.ipynb)
-Per-task routing (dispatcher in Rubric):
-- DFT-S, DFT-P, MPV → LLMSim (CoT-prompted mAP / recall / F1)
-- BIOGR → Intersection-over-Union (IoU)
-- PDB → Identity ratio (ID_r from RCSB pairwise alignment)
-- HFE, HFD, QECC, GEO → ROUGE-L (programmatic) + LMScore (3-point LLM judge)
+- `verifiers` for `RLMEnv`, `RubricGroup`, `JudgeRubric`, `SandboxMixin`, and RLM monitor rubrics
+- `prime-rl` installed separately on the GPU pod for Stage 5 training
+- Python `~=3.12.0`
+- Qwen3.5-7B policy model
+- No Environment Hub dependency for local research runs
 
-**Headline metric**: Per-task normalized score → average across all 10 tasks (matches Figure 5 of the paper).  
-Optional extra: pass@k (threshold-based on task-specific score).
+## Pipeline
 
-**Reward Hacking Guards (Enforced)**:
-- Freeze judge model (Gemini/Claude, different family from Qwen policy)
-- Programmatic spot-checks on LLMSim
-- Length penalty
-- Frozen LLMSim/LMScore prompts from Curie repo
-- Sanity batch every ~100 GRPO steps
+**Stage 0**: Safeguards and locked config values  
+**Stage 1**: uv setup and Prime/verifiers imports  
+**Stage 2**: `CurieRLMEnv` extending official `RLMEnv`  
+**Stage 3**: CURIE rubric dispatcher and scorers  
+**Stage 3.5**: Baseline eval on held-out splits, no training  
+**Stage 4 (SKIPPED)**: no public SFT trajectory data exists for RLM on CURIE  
+**Stage 5**: continual replay RL with prime-rl DPPO+KL and DR-GRPO advantages  
+**Stage 5.5 (CONTINGENCY)**: RFT bootstrap from stalled continual Phase 1 rollouts only  
+**Stage 6 (SKIPPED)**: no separate mixing stage; replay is now inside Stage 5 training  
+**Stage 6.5**: verification  
+**Stage 7**: internal final eval, ablations, report  
+**Stage 8**: optional hub push
 
-## Quickstart — Open in Claude Code
+## Continual Stage 5
+
+Sequential family-only training has been replaced. Training now uses one continual replay environment per phase:
+
+| Phase | Current Tasks | Replay Tasks | Mixture |
+|---|---|---|---|
+| 1 | DFT-C, HFE, HFD, QECC_65, GEO | none | 100% current |
+| 2 | DFT-S, DFT-P, MPVE | Phase 1 tasks | 70% current, 30% Phase 1 replay |
+| 3 | BIOGR, PDB | Phase 1 tasks and Phase 2 tasks | 60% current, 20% Phase 1 replay, 20% Phase 2 replay |
+
+The training configs call `CurieRLMEnv` with `phase = 1`, `phase = 2`, or `phase = 3`. Single-task `task_id` loading remains for eval and rubric compatibility, but it is not the Stage 5 training path.
+
+Run order:
+
 ```bash
-mkdir curie-rlm-env && cd curie-rlm-env
-uv init --name curie-rlm-env
-uv add "verifiers>=0.1.12" "prime-rl>=0.5.0"
-uv add --dev pytest black ruff pytest-cov
-mkdir -p config .claude/agents
+./scripts/run_continual_phase1.sh
+
+export CONTINUAL_PHASE1_CKPT=outputs/continual_phase1/step_<N>/
+./scripts/run_continual_phase2.sh
+
+export CONTINUAL_PHASE2_CKPT=outputs/continual_phase2/step_<N>/
+./scripts/run_continual_phase3.sh
 ```
 
-Open folder in **Claude Code** and type:  
-**"Start Stage 0 following the full pipeline in README.md using sub-agents"**
+Phase 2 and Phase 3 require `GEMINI_API_KEY` because retrieval tasks are present through current tasks or replay. Both scripts export `CURIE_JUDGE_CACHE=1`.
+
+## CURIE Metrics
+
+Rubric dispatch:
+
+- Retrieval: DFT-S, DFT-P, MPVE → LLMSim precision/recall/F1
+- Geometric: BIOGR → IoU
+- Structural: PDB → identity ratio `ID_r` through FASTA `>` extraction only
+- Free-form: DFT-C, HFE, HFD, QECC_65, GEO → ROUGE-L + BERTScore
+
+Headline metric: per-task normalized score averaged across all 10 tasks.
+
+## Key Files
+
+- `src/curie_rlm_env/continual.py`: task groups, phase definitions, replay ratios, deterministic dataset mixing
+- `src/curie_rlm_env/env.py`: `CurieRLMEnv` wiring for continual training phases and single-task eval
+- `configs/curie_grpo_continual_phase1.toml`
+- `configs/curie_grpo_continual_phase2.toml`
+- `configs/curie_grpo_continual_phase3.toml`
+- `scripts/run_continual_phase1.sh`
+- `scripts/run_continual_phase2.sh`
+- `scripts/run_continual_phase3.sh`

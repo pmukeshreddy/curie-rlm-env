@@ -6,20 +6,20 @@ One-page operator runbook. **Run only if a trigger condition fires.**
 
 Trigger if EITHER:
 
-1. **No reward improvement**: Phase 1 (free-form) reward curve has not improved beyond `baseline_mean + 0.05` over 500 training steps in W&B.
+1. **No reward improvement**: Continual Phase 1 (free-form current tasks) reward curve has not improved beyond `baseline_mean + 0.05` over 500 training steps in W&B.
 2. **High variance**: Phase 1 step time is acceptable but reward variance is too high to yield clean gradient signal — `variance > 2x reward mean` across rollouts.
 
 If neither trigger fires, Stage 5.5 is **not run**. The code is shelved.
 
 ## What it does
 
-RFT (Rejection-sampling Fine-Tuning) bootstraps the policy via supervised fine-tuning on its own high-reward rollouts captured during Stage 5 phase 1.
+RFT (Rejection-sampling Fine-Tuning) bootstraps the policy via supervised fine-tuning on its own high-reward rollouts captured during Stage 5 continual Phase 1.
 
-- Filters phase 1's emitted rollouts by `reward >= T` (default `T = 0.5`).
+- Filters continual Phase 1's emitted rollouts by `reward >= T` (default `T = 0.5`).
 - Caps each task at `max_per_task = 50` (top-K by reward).
 - Writes them in prime-rl SFT format (`messages`, `task_id`, `reward` per line).
-- Runs prime-rl `sft` trainer for `max_steps = 50` from the stalled phase 1 checkpoint.
-- Writes a new checkpoint that becomes the resume point for phase 1.
+- Runs prime-rl `sft` trainer for `max_steps = 50` from the stalled continual Phase 1 checkpoint.
+- Writes a new checkpoint that becomes the resume point for continual Phase 1.
 
 Every demonstration is a real Qwen self-rollout on a real Curie problem. **ZERO-SYNTHETIC compliant** per CLAUDE.md L15.
 
@@ -27,8 +27,8 @@ Every demonstration is a real Qwen self-rollout on a real Curie problem. **ZERO-
 
 ```bash
 # Required env vars
-export PHASE1_STALLED_CKPT=outputs/phase1/step_<N>/      # the stalled checkpoint
-export ROLLOUTS_DIR=outputs/phase1/rollouts/             # phase 1's rollout records
+export PHASE1_STALLED_CKPT=outputs/continual_phase1/step_<N>/      # the stalled checkpoint
+export ROLLOUTS_DIR=outputs/continual_phase1/rollouts/             # continual Phase 1 rollout records
 
 # Optional
 export RFT_THRESHOLD=0.5                                  # default; lower if filtered set is empty
@@ -40,24 +40,24 @@ export WANDB_NAME=rft_bootstrap                           # default
 The script:
 1. Runs `extract_high_reward_rollouts.py` to filter + cap → `outputs/rft/high_reward_rollouts.jsonl`.
 2. Runs `uv run sft @ configs/curie_rft_phase1.toml` with `--model.name $PHASE1_STALLED_CKPT`.
-3. Prints resume instructions for phase 1.
+3. Prints resume instructions for continual Phase 1.
 
 ## How to verify it worked
 
 After RFT completes:
 
-1. Resume phase 1 with the RFT'd checkpoint:
+1. Resume continual Phase 1 with the RFT'd checkpoint:
    ```bash
    export PHASE1_RESUME_CKPT=outputs/rft/step_<N>/
-   # Edit run_phase1.sh or pass --model.name $PHASE1_RESUME_CKPT
-   ./scripts/run_phase1.sh
+   OUTPUT_DIR=outputs/continual_phase1_rft_resume \
+       ./scripts/run_continual_phase1.sh --model.name "$PHASE1_RESUME_CKPT"
    ```
 2. Within the first ~50 steps of the resumed run, verify in W&B:
    - **Structured trajectories**: assistant turns include tool calls (not pure text).
    - **Sub-LM call count > 0**: `llm_batch` is being invoked.
    - **Reward variance reduced**: per-step variance ÷ mean is lower than pre-RFT.
 
-If all three hold, RFT helped. Continue phase 1 → phase 2 → phase 3 normally.
+If all three hold, RFT helped. Continue continual Phase 1 → continual Phase 2 → continual Phase 3.
 
 ## Failure modes
 

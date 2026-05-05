@@ -5,7 +5,7 @@ Runs the Stage 3.5 baseline_eval logic against N checkpoints sequentially
 
 Usage:
     uv run python scripts/run_full_eval.py \\
-        --checkpoints "baseline,phase1,phase2,phase3" \\
+        --checkpoints "baseline,continual_phase1,continual_phase2,continual_phase3" \\
         --endpoints "http://ep1:8000/v1,http://ep2:8000/v1,http://ep3:8000/v1,http://ep4:8000/v1" \\
         --output results/full_eval.json
 

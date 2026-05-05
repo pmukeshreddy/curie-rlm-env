@@ -237,9 +237,9 @@ def test_generate_report_config_snapshot_includes_all_yamls():
     for yaml_name in ("safeguards.yaml", "judge.yaml",
                       "rubric_dispatcher.yaml", "curie_tasks.yaml"):
         assert f"config/{yaml_name}" in md, f"{yaml_name} not embedded in config snapshot"
-    # All 3 RL toml configs
-    for toml_name in ("curie_grpo_freeform.toml", "curie_grpo_retrieval.toml",
-                      "curie_grpo_geometric.toml"):
+    # All 3 continual replay RL toml configs
+    for toml_name in ("curie_grpo_continual_phase1.toml", "curie_grpo_continual_phase2.toml",
+                      "curie_grpo_continual_phase3.toml"):
         assert f"configs/{toml_name}" in md, f"{toml_name} not embedded in config snapshot"
 
 

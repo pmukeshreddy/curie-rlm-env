@@ -179,7 +179,11 @@ def _render_caveats(eval_data: dict[str, Any], checkpoints: list[str]) -> str:
 
 def _render_config_snapshot() -> str:
     yamls = ("safeguards.yaml", "judge.yaml", "rubric_dispatcher.yaml", "curie_tasks.yaml")
-    tomls = ("curie_grpo_freeform.toml", "curie_grpo_retrieval.toml", "curie_grpo_geometric.toml")
+    tomls = (
+        "curie_grpo_continual_phase1.toml",
+        "curie_grpo_continual_phase2.toml",
+        "curie_grpo_continual_phase3.toml",
+    )
     out = ["## Configuration snapshot\n"]
     for name in yamls:
         path = CONFIG_DIR / name

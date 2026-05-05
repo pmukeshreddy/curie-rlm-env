@@ -1,8 +1,8 @@
-"""Stage 5b empirical pre-flight probe.
+"""Stage 5 continual replay empirical pre-flight probe.
 
 Measures wall-clock per rollout on 5 rollouts each for HFE (free-form),
 DFT-S (retrieval w/ LLMSim), and BIOGR (geometric). Numbers feed into
-the final Stage 5b TOMLs (max_steps, rollouts_per_example).
+the continual Stage 5 TOMLs (max_steps, rollouts_per_example).
 
 Usage:
     uv run python scripts/probe_rollout_timing.py --endpoint $QWEN_ENDPOINT
@@ -123,7 +123,7 @@ def _recommendation(probe_results: list[dict]) -> dict:
         "rollouts_per_example_retrieval": rpe_retrieval,
         "rollouts_per_example_freeform": rpe_freeform,
         "rollouts_per_example_geometric": rpe_geometric,
-        "estimated_step_minutes_freeform_phase": round(est_step_minutes_freeform, 2),
+        "estimated_step_minutes_continual_phase1": round(est_step_minutes_freeform, 2),
         "target_step_minutes": target_step_minutes,
         "batch_size_assumed": batch_size,
     }
@@ -161,7 +161,7 @@ async def _main_async(args: argparse.Namespace) -> int:
     print(f"Recommended rollouts_per_example for free-form: {rec['rollouts_per_example_freeform']}")
     print(f"Recommended rollouts_per_example for geometric: {rec['rollouts_per_example_geometric']}")
     print(f"Estimated wall-clock per training step (batch_size={rec['batch_size_assumed']}): "
-          f"{rec['estimated_step_minutes_freeform_phase']} minutes (free-form phase)")
+          f"{rec['estimated_step_minutes_continual_phase1']} minutes (continual Phase 1)")
     print()
     print(f"Wrote {args.output}")
     return 0

@@ -11,6 +11,9 @@ is_completed cannot be overridden (it is @final at environment.py:658). Schema
 validation is wired via a @vf.stop-decorated method that returns True (signal
 stop) or raises ValueError (loud schema fail). Returns False ONLY when the
 final answer is not yet present in state — the multiturn-stop convention.
+
+Training quote from src/curie_rlm_env/continual.py:
+"Phase 2: 70% retrieval current tasks + 30% Phase 1 replay."
 """
 from __future__ import annotations
 
@@ -21,6 +24,7 @@ import verifiers as vf
 from verifiers.envs.experimental.rlm_env import RLMEnv
 from verifiers.types import State
 
+from .continual import CONTINUAL_SEED, load_continual_phase
 from .datasets import load_curie_task
 from .rubric import CurieRubric
 from .schema import validate_answer
@@ -31,11 +35,26 @@ _CFG_PATH = (
 
 
 class CurieRLMEnv(RLMEnv):
-    """Single-task CurieRLMEnv. Safeguards from config/safeguards.yaml only."""
+    """CurieRLMEnv for continual training phases and single-task eval."""
 
-    def __init__(self, task_id: str, split: str = "test"):
+    def __init__(
+        self,
+        task_id: str | None = None,
+        split: str = "test",
+        phase: int | None = None,
+        seed: int = CONTINUAL_SEED,
+    ):
+        if (task_id is None) == (phase is None):
+            raise ValueError(
+                "CurieRLMEnv requires exactly one of task_id (single-task eval) "
+                "or phase (continual training)."
+            )
         cfg = yaml.safe_load(_CFG_PATH.read_text())
-        dataset = load_curie_task(task_id, split)
+        dataset = (
+            load_continual_phase(phase, split=split, seed=seed)
+            if phase is not None
+            else load_curie_task(task_id, split)
+        )
         rubric = CurieRubric()
         super().__init__(
             dataset=dataset,
@@ -47,7 +66,9 @@ class CurieRLMEnv(RLMEnv):
             code_execution_timeout=cfg["sandbox"]["code_execution_timeout"],
             abort_on_code_timeout=cfg["sandbox"]["abort_on_code_timeout"],
         )
-        self.task_id = task_id
+        self.task_id = task_id if task_id is not None else f"continual_phase_{phase}"
+        self.phase = phase
+        self.seed = seed
 
     @vf.stop
     async def answer_schema_valid(self, state: State) -> bool:
@@ -57,5 +78,32 @@ class CurieRLMEnv(RLMEnv):
         return True
 
 
-def load_environment(task_id: str, split: str = "test") -> CurieRLMEnv:
-    return CurieRLMEnv(task_id, split)
+def load_task_environment(task_id: str, split: str = "test") -> CurieRLMEnv:
+    """Load a single-task CURIE environment for eval and rubric compatibility."""
+    return CurieRLMEnv(task_id=task_id, split=split)
+
+
+def load_continual_environment(
+    phase: int,
+    split: str = "train",
+    seed: int = CONTINUAL_SEED,
+) -> CurieRLMEnv:
+    """Load a continual replay training environment."""
+    return CurieRLMEnv(phase=phase, split=split, seed=seed)
+
+
+def load_environment(
+    task_id: str | None = None,
+    split: str = "test",
+    phase: int | None = None,
+    seed: int = CONTINUAL_SEED,
+) -> CurieRLMEnv:
+    """Prime/verifiers entrypoint.
+
+    Training configs pass phase=<1|2|3>. Baseline/eval callers keep task_id.
+    """
+    if phase is not None:
+        return load_continual_environment(phase=phase, split=split, seed=seed)
+    if task_id is None:
+        raise ValueError("load_environment requires task_id for eval or phase for continual training.")
+    return load_task_environment(task_id=task_id, split=split)

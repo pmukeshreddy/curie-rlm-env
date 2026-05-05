@@ -1,4 +1,4 @@
-# CLAUDE.md — curie-rlm-env (Locked Rules — 2026 Best Practices)
+# AGENTS.md — curie-rlm-env (Locked Rules — 2026 Best Practices)
 
 ## Project Overview
 Private research project implementing the official Google CURIE scientific long-context benchmark (10 tasks, 580 problems) using Recursive Language Models (RLM) + GRPO.  
@@ -65,7 +65,7 @@ Headline metric: per-task normalized score → average across 10 tasks (matches 
 Optional: pass@k (threshold-based, e.g. F1>0.5 for retrieval, ROUGE-L>0.3 for free-form).
 
 ## Reward Hacking Guards (Strictly Enforced)
-1. Freeze judge model (Gemini or Claude — different family from Qwen policy).
+1. Freeze judge model (Gemini or Codex — different family from Qwen policy).
 2. Programmatic spot-check after LLMSim (numeric tolerance <5%).
 3. Length penalty for outputs significantly longer than ground-truth average (~954 words).
 4. Use exact frozen prompts from Curie repo (never "improve").

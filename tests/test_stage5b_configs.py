@@ -1,4 +1,7 @@
-"""Stage 5b — RL training pipeline configs + judge cache tests.
+"""Stage 5 — continual replay RL training configs + judge cache tests.
+
+Quote from src/curie_rlm_env/continual.py:
+"Phase 2: 70% retrieval current tasks + 30% Phase 1 replay."
 
 Static structure tests only (file presence, TOML field correctness via tomllib
 parse, judge cache behavior). prime-rl is NOT installed in this repo; configs
@@ -19,6 +22,12 @@ _CONFIGS = _PROJECT_ROOT / "configs"
 _SCRIPTS = _PROJECT_ROOT / "scripts"
 
 _CFG_NAMES = (
+    "curie_grpo_continual_phase1.toml",
+    "curie_grpo_continual_phase2.toml",
+    "curie_grpo_continual_phase3.toml",
+)
+
+_OLD_CFG_NAMES = (
     "curie_grpo_freeform.toml",
     "curie_grpo_retrieval.toml",
     "curie_grpo_geometric.toml",
@@ -40,36 +49,53 @@ def _stripped_code(text: str) -> str:
 # Config presence + structure
 # ---------------------------------------------------------------------------
 
-def test_three_configs_exist():
+def test_three_continual_configs_exist():
     for name in _CFG_NAMES:
         assert (_CONFIGS / name).is_file(), f"{name} missing"
 
 
-def test_freeform_config_has_5_env_blocks():
-    cfg = _load_toml("curie_grpo_freeform.toml")
+def test_old_sequential_configs_removed():
+    for name in _OLD_CFG_NAMES:
+        assert not (_CONFIGS / name).exists(), f"{name} must not remain as a training side path"
+
+
+def test_continual_phase1_config_uses_phase_env():
+    cfg = _load_toml("curie_grpo_continual_phase1.toml")
     envs = cfg["orchestrator"]["train"]["env"]
-    task_ids = sorted(e["args"]["task_id"] for e in envs)
-    assert task_ids == sorted(["DFT-C", "HFE", "HFD", "QECC_65", "GEO"])
+    assert len(envs) == 1
+    assert envs[0]["args"] == {"phase": 1, "split": "train", "seed": 42}
 
 
-def test_retrieval_config_has_3_env_blocks():
-    cfg = _load_toml("curie_grpo_retrieval.toml")
+def test_continual_phase2_config_uses_phase_env():
+    cfg = _load_toml("curie_grpo_continual_phase2.toml")
     envs = cfg["orchestrator"]["train"]["env"]
-    task_ids = sorted(e["args"]["task_id"] for e in envs)
-    assert task_ids == sorted(["DFT-S", "DFT-P", "MPVE"])
+    assert len(envs) == 1
+    assert envs[0]["args"] == {"phase": 2, "split": "train", "seed": 42}
 
 
-def test_retrieval_rollouts_per_example_is_4():
-    # Stage 5b judge bottleneck mitigation per Stage 5a §8
-    cfg = _load_toml("curie_grpo_retrieval.toml")
-    assert cfg["orchestrator"]["rollouts_per_example"] == 4
-
-
-def test_geometric_config_has_2_env_blocks():
-    cfg = _load_toml("curie_grpo_geometric.toml")
+def test_continual_phase3_config_uses_phase_env():
+    cfg = _load_toml("curie_grpo_continual_phase3.toml")
     envs = cfg["orchestrator"]["train"]["env"]
-    task_ids = sorted(e["args"]["task_id"] for e in envs)
-    assert task_ids == sorted(["BIOGR", "PDB"])
+    assert len(envs) == 1
+    assert envs[0]["args"] == {"phase": 3, "split": "train", "seed": 42}
+
+
+def test_training_configs_do_not_pass_single_task_ids():
+    for name in _CFG_NAMES:
+        cfg = _load_toml(name)
+        envs = cfg["orchestrator"]["train"]["env"]
+        assert all("task_id" not in env["args"] for env in envs)
+
+
+def test_retrieval_replay_phases_rollouts_per_example_is_4():
+    for name in ("curie_grpo_continual_phase2.toml", "curie_grpo_continual_phase3.toml"):
+        cfg = _load_toml(name)
+        assert cfg["orchestrator"]["rollouts_per_example"] == 4
+
+
+def test_phase1_rollouts_per_example_is_16():
+    cfg = _load_toml("curie_grpo_continual_phase1.toml")
+    assert cfg["orchestrator"]["rollouts_per_example"] == 16
 
 
 def test_no_classical_grpo_kl_coef_present():
@@ -163,9 +189,31 @@ def test_probe_script_imports():
     py_compile.compile(str(script_path), doraise=True)
 
 
-def test_run_scripts_exist_and_executable():
+def test_continual_run_scripts_exist_and_executable():
+    for phase in (1, 2, 3):
+        path = _SCRIPTS / f"run_continual_phase{phase}.sh"
+        assert path.is_file(), f"run_continual_phase{phase}.sh missing"
+        mode = path.stat().st_mode
+        assert mode & stat.S_IXUSR, f"run_continual_phase{phase}.sh not user-executable"
+
+
+def test_old_sequential_run_scripts_removed():
     for phase in (1, 2, 3):
         path = _SCRIPTS / f"run_phase{phase}.sh"
-        assert path.is_file(), f"run_phase{phase}.sh missing"
-        mode = path.stat().st_mode
-        assert mode & stat.S_IXUSR, f"run_phase{phase}.sh not user-executable"
+        assert not path.exists(), f"{path.name} must not remain as a training side path"
+
+
+def test_continual_replay_scripts_use_new_checkpoint_vars():
+    phase2 = (_SCRIPTS / "run_continual_phase2.sh").read_text()
+    phase3 = (_SCRIPTS / "run_continual_phase3.sh").read_text()
+    assert "CONTINUAL_PHASE1_CKPT" in phase2
+    assert "CONTINUAL_PHASE2_CKPT" in phase3
+    assert '"$PHASE1_CKPT"' not in phase2
+    assert '"$PHASE2_CKPT"' not in phase3
+
+
+def test_retrieval_replay_scripts_enable_judge_cache():
+    for phase in (2, 3):
+        text = (_SCRIPTS / f"run_continual_phase{phase}.sh").read_text()
+        assert "GEMINI_API_KEY" in text
+        assert "CURIE_JUDGE_CACHE=1" in text

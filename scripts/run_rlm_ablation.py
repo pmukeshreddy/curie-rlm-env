@@ -1,6 +1,6 @@
 """Stage 7 — RLM scaffold on/off ablation.
 
-Runs the final phase3 checkpoint TWO ways:
+Runs the final continual Phase 3 checkpoint TWO ways:
   Mode A — RLM ON  (sub_llm_max_turns=1, default RLM scaffold)
   Mode B — RLM OFF (sub_llm_max_turns=0, forces flat LM, no recursion)
 
@@ -8,7 +8,7 @@ Both modes use the same checkpoint. Difference is the sub-LM recursion budget.
 
 Usage:
     uv run python scripts/run_rlm_ablation.py \\
-        --checkpoint phase3 \\
+        --checkpoint continual_phase3 \\
         --endpoint http://ep:8000/v1 \\
         --output results/rlm_ablation.json
 """

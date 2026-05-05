@@ -139,7 +139,7 @@ def test_rft_config_exists_and_parses():
 
 def test_rft_config_lr_lower_than_phase1():
     rft = tomllib.loads((_CONFIGS / "curie_rft_phase1.toml").read_text())
-    phase1 = tomllib.loads((_CONFIGS / "curie_grpo_freeform.toml").read_text())
+    phase1 = tomllib.loads((_CONFIGS / "curie_grpo_continual_phase1.toml").read_text())
     assert rft["trainer"]["optim"]["lr"] < phase1["trainer"]["optim"]["lr"]
     assert rft["trainer"]["optim"]["lr"] == 5e-7
     assert phase1["trainer"]["optim"]["lr"] == 1e-6

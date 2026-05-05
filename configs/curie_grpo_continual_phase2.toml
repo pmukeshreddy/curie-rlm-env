@@ -1,0 +1,47 @@
+# Stage 5 — Continual CURIE-RLM Phase 2 (DPPO+KL with DR-GRPO advantages).
+#
+# Quote from src/curie_rlm_env/continual.py:
+#   "Phase 2: 70% retrieval current tasks + 30% Phase 1 replay."
+#
+# Current tasks: DFT-S, DFT-P, MPVE.
+# Replay tasks: DFT-C, HFE, HFD, QECC_65, GEO.
+# Retrieval records use LLMSim in the loop; judge cache must be active.
+
+max_steps = 100
+seq_len = 16384
+
+[deployment]
+# TUNE PER POD AVAILABILITY
+
+[wandb]
+project = "curie-rlm"
+name = "continual_phase2_retrieval_replay_qwen3_5_7b"
+
+[ckpt]
+interval = 25
+keep_last = 3
+
+[model]
+name = "Qwen/Qwen3.5-7B-Instruct"  # phase2 OVERRIDDEN at CLI to phase1 ckpt path
+ac = true
+
+[orchestrator]
+batch_size = 64
+rollouts_per_example = 4  # retrieval LLMSim bottleneck remains in-loop
+
+[[orchestrator.train.env]]
+id = "curie-rlm-env"
+name = "continual_phase2_retrieval_with_phase1_replay"
+args = { phase = 2, split = "train", seed = 42 }
+
+[orchestrator.train.sampling]
+max_completion_tokens = 4096
+
+[trainer]
+# prime-rl defaults: kl_tau, dppo_mask_high, dppo_mask_low, adv_tau
+
+[trainer.optim]
+lr = 1e-6
+
+[inference.parallel]
+# TUNE PER POD AVAILABILITY
