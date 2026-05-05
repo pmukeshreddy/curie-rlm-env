@@ -30,6 +30,10 @@ from verifiers.types import State
 from .continual import CONTINUAL_SEED, load_continual_phase_dataset
 from .datasets import load_curie_task
 from .judge import make_gemini_judge_from_env
+from .local_sandbox import (
+    LocalDockerSandboxClient,
+    resolve_sandbox_backend,
+)
 from .rubric import CurieRubric
 from .schema import validate_answer
 
@@ -172,6 +176,16 @@ class CurieRLMEnv(RLMEnv):
             self.interception_port = settings["port"]
             if settings["override_url"] is not None:
                 self._interception_url_override = settings["override_url"]
+
+        self._curie_sandbox_backend = resolve_sandbox_backend()
+        if self._curie_sandbox_backend == "local_docker":
+            existing = getattr(self, "sandbox_client", None)
+            if existing is not None and hasattr(existing, "teardown"):
+                try:
+                    existing.teardown(wait=False)
+                except Exception:
+                    pass
+            self.sandbox_client = LocalDockerSandboxClient()
 
     async def _setup_interception_and_register(
         self, state: State, rollout_id: str

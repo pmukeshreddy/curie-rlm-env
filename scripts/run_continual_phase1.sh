@@ -5,9 +5,11 @@
 #
 # Local-only training: PRIME_API_KEY is NOT required. CurieRLMEnv resolves a local
 # sandbox→env-worker callback URL at startup (default http://127.0.0.1:<auto_port>),
-# bypassing prime_tunnel. Override via CURIE_LOCAL_INTERCEPTION_HOST / _PORT / _BIND
-# / _URL. Set CURIE_USE_PRIME_TUNNEL=1 to opt back into the hosted-tunnel path
-# (which DOES require PRIME_API_KEY).
+# bypassing prime_tunnel. Sandboxes default to LOCAL DOCKER on the same pod
+# (CURIE_SANDBOX_BACKEND=local_docker), so prime_sandboxes' hosted backend is also
+# bypassed. Override via CURIE_LOCAL_INTERCEPTION_HOST / _PORT / _BIND / _URL.
+# Set CURIE_USE_PRIME_TUNNEL=1 to opt into the hosted tunnel path, or
+# CURIE_SANDBOX_BACKEND=prime to opt into hosted sandboxes (both require PRIME_API_KEY).
 set -euo pipefail
 
 if [[ -z "${INFERENCE_SERVER_IP:-}" ]]; then
@@ -23,6 +25,7 @@ ulimit -n 32000
 # network namespace (e.g. docker bridge) and needs to reach the env worker via gateway.
 export CURIE_LOCAL_INTERCEPTION_HOST="${CURIE_LOCAL_INTERCEPTION_HOST:-127.0.0.1}"
 export CURIE_LOCAL_INTERCEPTION_BIND="${CURIE_LOCAL_INTERCEPTION_BIND:-127.0.0.1}"
+export CURIE_SANDBOX_BACKEND="${CURIE_SANDBOX_BACKEND:-local_docker}"
 
 uv run rl @ configs/curie_grpo_continual_phase1.toml \
     --wandb.name "${WANDB_NAME:-continual_phase1_freeform_qwen3_5_7b}" \

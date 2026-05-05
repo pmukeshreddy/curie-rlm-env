@@ -416,3 +416,141 @@ def test_trainer_model_ac_freq_one_still_present_after_routing_fix():
     for name in _CFG_NAMES:
         cfg = _load_toml(name)
         assert cfg["trainer"]["model"]["ac"] == {"freq": 1}
+
+
+# ---------------------------------------------------------------------------
+# Local Docker sandbox backend
+# ---------------------------------------------------------------------------
+
+
+def _reset_sandbox_env(monkeypatch):
+    monkeypatch.delenv("CURIE_SANDBOX_BACKEND", raising=False)
+    monkeypatch.delenv("CURIE_SANDBOX_NETWORK", raising=False)
+
+
+def test_resolve_sandbox_backend_defaults_to_local_docker(monkeypatch):
+    sys.path.insert(0, str(_PROJECT_ROOT / "src"))
+    from curie_rlm_env.local_sandbox import resolve_sandbox_backend
+
+    _reset_sandbox_env(monkeypatch)
+    assert resolve_sandbox_backend() == "local_docker"
+
+
+def test_resolve_sandbox_backend_accepts_prime_opt_in(monkeypatch):
+    sys.path.insert(0, str(_PROJECT_ROOT / "src"))
+    from curie_rlm_env.local_sandbox import resolve_sandbox_backend
+
+    _reset_sandbox_env(monkeypatch)
+    monkeypatch.setenv("CURIE_SANDBOX_BACKEND", "prime")
+    assert resolve_sandbox_backend() == "prime"
+
+
+def test_resolve_sandbox_backend_rejects_unknown(monkeypatch):
+    sys.path.insert(0, str(_PROJECT_ROOT / "src"))
+    from curie_rlm_env.local_sandbox import resolve_sandbox_backend
+
+    _reset_sandbox_env(monkeypatch)
+    monkeypatch.setenv("CURIE_SANDBOX_BACKEND", "subprocess")
+    with _pytest.raises(ValueError):
+        resolve_sandbox_backend()
+
+
+def test_local_docker_sandbox_client_implements_required_interface():
+    """LocalDockerSandboxClient must expose every method SandboxMixin awaits."""
+    sys.path.insert(0, str(_PROJECT_ROOT / "src"))
+    from curie_rlm_env.local_sandbox import LocalDockerSandboxClient
+
+    required = (
+        "create",
+        "wait_for_creation",
+        "delete",
+        "bulk_delete",
+        "execute_command",
+        "upload_file",
+        "download_file",
+        "read_file",
+        "run_background_job",
+        "teardown",
+    )
+    client = LocalDockerSandboxClient()
+    for name in required:
+        assert hasattr(client, name), f"LocalDockerSandboxClient missing {name!r}"
+
+
+def test_local_docker_sandbox_client_lazy_imports_docker():
+    """Constructing the client must NOT touch the Docker daemon (lazy)."""
+    sys.path.insert(0, str(_PROJECT_ROOT / "src"))
+    from curie_rlm_env.local_sandbox import LocalDockerSandboxClient
+
+    # Should construct without docker installed/running. This test passes regardless of
+    # docker availability — the assertion is "no exception during __init__".
+    client = LocalDockerSandboxClient()
+    # Internal state: no docker client yet.
+    assert client._docker is None
+    assert client._containers == {}
+
+
+def test_continual_scripts_default_sandbox_to_local_docker():
+    """Each continual script must export CURIE_SANDBOX_BACKEND with local_docker default."""
+    for continual_phase in (1, 2, 3):
+        text = (_SCRIPTS / f"run_continual_phase{continual_phase}.sh").read_text()
+        assert "CURIE_SANDBOX_BACKEND" in text
+        assert "local_docker" in text
+
+
+def test_check_local_runtime_script_compiles():
+    path = _SCRIPTS / "check_local_runtime.py"
+    assert path.is_file()
+    py_compile.compile(str(path), doraise=True)
+
+
+def test_readme_documents_local_docker_default():
+    readme = (_PROJECT_ROOT / "README.md").read_text()
+    assert "local_docker" in readme
+    assert "CURIE_SANDBOX_BACKEND" in readme
+    assert "PRIME_API_KEY" in readme
+    # README explicitly states PRIME_API_KEY is not required for the default mode.
+    assert any(
+        phrase in readme
+        for phrase in (
+            "does not require `PRIME_API_KEY`",
+            "does NOT require `PRIME_API_KEY`",
+            "PRIME_API_KEY is not required",
+        )
+    )
+
+
+def test_continual_design_unchanged_after_local_sandbox():
+    """Sandbox backend swap must not touch continual replay design.
+
+    Re-asserts the four invariants the user specified: continual_phase, replay
+    mixture, Qwen/Qwen3-8B, and the [trainer.model.ac] freq=1 line.
+    """
+    sys.path.insert(0, str(_PROJECT_ROOT / "src"))
+    from curie_rlm_env.continual import CONTINUAL_PHASES, mixture_for_continual_phase
+
+    # Continual phases unchanged.
+    assert set(CONTINUAL_PHASES.keys()) == {1, 2, 3}
+    # Replay mixture unchanged: Phase 1 100% current; Phase 2 70/30; Phase 3 60/20/20.
+    assert mixture_for_continual_phase(1) == {"current": 1.0}
+    assert mixture_for_continual_phase(2) == {"current": 0.70, "phase1": 0.30}
+    assert mixture_for_continual_phase(3) == {"current": 0.60, "phase1": 0.20, "phase2": 0.20}
+
+    # Model + activation checkpointing unchanged.
+    for name in _CFG_NAMES:
+        cfg = _load_toml(name)
+        assert cfg["model"]["name"] == "Qwen/Qwen3-8B"
+        assert cfg["trainer"]["model"]["ac"] == {"freq": 1}
+        envs = cfg["orchestrator"]["train"]["env"]
+        assert len(envs) == 1
+        assert envs[0]["args"].get("continual_phase") in {1, 2, 3}
+
+
+def test_curie_rubric_signature_unchanged():
+    """The CurieRubric class shape (judge_client kwarg) must remain stable."""
+    sys.path.insert(0, str(_PROJECT_ROOT / "src"))
+    from curie_rlm_env.rubric import CurieRubric
+    import inspect
+
+    params = inspect.signature(CurieRubric.__init__).parameters
+    assert "judge_client" in params, "CurieRubric.__init__ must accept judge_client"

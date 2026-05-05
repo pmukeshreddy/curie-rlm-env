@@ -12,6 +12,7 @@ dependencies = [
     "Levenshtein>=0.25",
     "datasets>=2.19",
     "google-genai>=1.0",
+    "docker>=7.0",
 ]
 
 [build-system]
