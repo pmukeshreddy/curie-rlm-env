@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Stage 5 Continual Phase 1 — free-form current tasks.
 # Quote from configs/curie_grpo_continual_phase1.toml:
-# "args = { phase = 1, split = \"train\", seed = 42 }"
+# "args = { continual_phase = 1, split = \"train\", seed = 42 }"
 set -euo pipefail
 
 if [[ -z "${INFERENCE_SERVER_IP:-}" ]]; then

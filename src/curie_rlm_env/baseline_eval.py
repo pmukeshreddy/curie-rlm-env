@@ -21,6 +21,7 @@ from typing import Any, Callable, Optional
 import verifiers as vf
 
 from .env import load_environment
+from .judge import make_gemini_judge_from_env
 from .rubric import CurieRubric
 
 logger = logging.getLogger(__name__)
@@ -100,32 +101,10 @@ def _make_qwen_client(endpoint: str) -> "vf.Client":
 def _make_gemini_judge() -> Callable[[str], str]:
     """Build the gemini-2.5-pro judge callable for LLMSim tasks.
 
-    Hard-fails if GEMINI_API_KEY env var is missing or google-genai is not
-    installed (ZERO-FALLBACK: do not silently switch to a smaller judge).
+    Hard-fails if GEMINI_API_KEY env var is missing or google-genai cannot
+    import (ZERO-FALLBACK: do not silently switch to a smaller judge).
     """
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "GEMINI_API_KEY env var required for LLMSim judge (gemini-2.5-pro). "
-            "Set it before running baseline eval."
-        )
-    try:
-        from google import genai
-    except ImportError as e:
-        raise RuntimeError(
-            "google-genai not installed. Add it to pyproject.toml deps "
-            "before running baseline eval."
-        ) from e
-
-    client = genai.Client(api_key=api_key)
-
-    def judge_call(prompt: str) -> str:
-        response = client.models.generate_content(
-            model="gemini-2.5-pro", contents=prompt
-        )
-        return response.text or "{}"
-
-    return judge_call
+    return make_gemini_judge_from_env()
 
 
 def _attach_judge_to_env(env: Any, judge_callable: Callable[[str], str]) -> None:

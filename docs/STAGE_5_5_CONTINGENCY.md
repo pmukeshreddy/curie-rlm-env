@@ -63,14 +63,14 @@ If all three hold, RFT helped. Continue continual Phase 1 → continual Phase 2 
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `ERROR: RFT requires at least N high-reward rollouts; got 0` | Threshold too high, or phase 1 hasn't produced any successful rollouts. | Run more phase 1 steps OR lower `RFT_THRESHOLD=0.3`. |
+| `ERROR: RFT requires at least N high-reward rollouts; got 0` | Threshold too high, or continual Phase 1 hasn't produced any successful rollouts. | Run more continual Phase 1 steps OR lower `RFT_THRESHOLD=0.3`. |
 | SFT loss explodes (NaN / >10) within first 5 steps | `lr=5e-7` too high for the stalled checkpoint state. | Drop to `lr=1e-7` via `--trainer.optim.lr 1e-7`. |
-| Resumed phase 1 still doesn't learn | RFT didn't help — model can't make the leap from stalled state. | **Escalate**: collect rollout examples for human review, consider Stage 8 hub push and external eyes. |
+| Resumed continual Phase 1 still doesn't learn | RFT didn't help — model can't make the leap from stalled state. | **Escalate**: collect rollout examples for human review, consider Stage 8 hub push and external eyes. |
 | `PHASE1_STALLED_CKPT` missing or invalid | Operator forgot the env var. | Set the var; the bash launcher hard-fails with a clear message. |
 | `extract_high_reward_rollouts.py` skips most records | prime-rl rollout schema differs from our schema-agnostic normalizer. | Inspect a few `*.jsonl` records under `$ROLLOUTS_DIR`; adjust `_normalize_record()` in the script. |
 
 ## Provenance
 
 - Trigger conditions, RFT format, and ZERO-SYNTHETIC reasoning are locked in `CLAUDE.md` "Documented Deviations" section.
-- Hyperparameter choices (`lr=5e-7`, `loss_mask=assistant_only`, `max_steps=50`) source from Stage 4a memo §3-4 + Stage 5b precedent (lower than phase 1's `lr=1e-6`).
+- Hyperparameter choices (`lr=5e-7`, `loss_mask=assistant_only`, `max_steps=50`) source from Stage 4a memo §3-4 + Stage 5b precedent (lower than continual Phase 1's `lr=1e-6`).
 - Schema-agnostic extractor is a Stage 5b OQ-A precedent (prime-rl rollout output schema not verified from web docs).

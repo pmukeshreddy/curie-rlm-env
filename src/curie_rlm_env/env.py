@@ -24,8 +24,9 @@ import verifiers as vf
 from verifiers.envs.experimental.rlm_env import RLMEnv
 from verifiers.types import State
 
-from .continual import CONTINUAL_SEED, load_continual_phase
+from .continual import CONTINUAL_SEED, load_continual_phase_dataset
 from .datasets import load_curie_task
+from .judge import make_gemini_judge_from_env
 from .rubric import CurieRubric
 from .schema import validate_answer
 
@@ -41,21 +42,26 @@ class CurieRLMEnv(RLMEnv):
         self,
         task_id: str | None = None,
         split: str = "test",
-        phase: int | None = None,
+        continual_phase: int | None = None,
         seed: int = CONTINUAL_SEED,
     ):
-        if (task_id is None) == (phase is None):
+        if (task_id is None) == (continual_phase is None):
             raise ValueError(
                 "CurieRLMEnv requires exactly one of task_id (single-task eval) "
-                "or phase (continual training)."
+                "or continual_phase (continual training)."
             )
         cfg = yaml.safe_load(_CFG_PATH.read_text())
         dataset = (
-            load_continual_phase(phase, split=split, seed=seed)
-            if phase is not None
+            load_continual_phase_dataset(continual_phase, split=split, seed=seed)
+            if continual_phase is not None
             else load_curie_task(task_id, split)
         )
-        rubric = CurieRubric()
+        judge_client = (
+            make_gemini_judge_from_env()
+            if continual_phase in {2, 3}
+            else None
+        )
+        rubric = CurieRubric(judge_client=judge_client)
         super().__init__(
             dataset=dataset,
             rubric=rubric,
@@ -66,8 +72,8 @@ class CurieRLMEnv(RLMEnv):
             code_execution_timeout=cfg["sandbox"]["code_execution_timeout"],
             abort_on_code_timeout=cfg["sandbox"]["abort_on_code_timeout"],
         )
-        self.task_id = task_id if task_id is not None else f"continual_phase_{phase}"
-        self.phase = phase
+        self.task_id = task_id if task_id is not None else f"continual_phase_{continual_phase}"
+        self.continual_phase = continual_phase
         self.seed = seed
 
     @vf.stop
@@ -84,26 +90,26 @@ def load_task_environment(task_id: str, split: str = "test") -> CurieRLMEnv:
 
 
 def load_continual_environment(
-    phase: int,
+    continual_phase: int,
     split: str = "train",
     seed: int = CONTINUAL_SEED,
 ) -> CurieRLMEnv:
     """Load a continual replay training environment."""
-    return CurieRLMEnv(phase=phase, split=split, seed=seed)
+    return CurieRLMEnv(continual_phase=continual_phase, split=split, seed=seed)
 
 
 def load_environment(
     task_id: str | None = None,
     split: str = "test",
-    phase: int | None = None,
+    continual_phase: int | None = None,
     seed: int = CONTINUAL_SEED,
 ) -> CurieRLMEnv:
     """Prime/verifiers entrypoint.
 
-    Training configs pass phase=<1|2|3>. Baseline/eval callers keep task_id.
+    Training configs pass continual_phase=<1|2|3>. Baseline/eval callers keep task_id.
     """
-    if phase is not None:
-        return load_continual_environment(phase=phase, split=split, seed=seed)
+    if continual_phase is not None:
+        return load_continual_environment(continual_phase=continual_phase, split=split, seed=seed)
     if task_id is None:
-        raise ValueError("load_environment requires task_id for eval or phase for continual training.")
+        raise ValueError("load_environment requires task_id for eval or continual_phase for continual training.")
     return load_task_environment(task_id=task_id, split=split)

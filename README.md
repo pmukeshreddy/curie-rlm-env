@@ -30,7 +30,7 @@ Private local research project implementing Google CURIE scientific long-context
 
 ## Continual Stage 5
 
-Sequential family-only training has been replaced. Training now uses one continual replay environment per phase:
+Sequential family-only training has been replaced. Training now uses one continual replay environment per continual phase:
 
 | Phase | Current Tasks | Replay Tasks | Mixture |
 |---|---|---|---|
@@ -38,7 +38,7 @@ Sequential family-only training has been replaced. Training now uses one continu
 | 2 | DFT-S, DFT-P, MPVE | Phase 1 tasks | 70% current, 30% Phase 1 replay |
 | 3 | BIOGR, PDB | Phase 1 tasks and Phase 2 tasks | 60% current, 20% Phase 1 replay, 20% Phase 2 replay |
 
-The training configs call `CurieRLMEnv` with `phase = 1`, `phase = 2`, or `phase = 3`. Single-task `task_id` loading remains for eval and rubric compatibility, but it is not the Stage 5 training path.
+The training configs call `CurieRLMEnv` with `continual_phase = 1`, `continual_phase = 2`, or `continual_phase = 3`. Single-task `task_id` loading remains for eval and rubric compatibility, but it is not the Stage 5 training path.
 
 Run order:
 
@@ -52,7 +52,7 @@ export CONTINUAL_PHASE2_CKPT=outputs/continual_phase2/step_<N>/
 ./scripts/run_continual_phase3.sh
 ```
 
-Phase 2 and Phase 3 require `GEMINI_API_KEY` because retrieval tasks are present through current tasks or replay. Both scripts export `CURIE_JUDGE_CACHE=1`.
+Phase 2 and Phase 3 require `GEMINI_API_KEY` because retrieval tasks are present through current tasks or replay. `CurieRLMEnv` wires that key into `CurieRubric` as the LLMSim judge client, and both scripts export `CURIE_JUDGE_CACHE=1`.
 
 ## CURIE Metrics
 
@@ -75,3 +75,4 @@ Headline metric: per-task normalized score averaged across all 10 tasks.
 - `scripts/run_continual_phase1.sh`
 - `scripts/run_continual_phase2.sh`
 - `scripts/run_continual_phase3.sh`
+- `scripts/eval_retention_forgetting.py`

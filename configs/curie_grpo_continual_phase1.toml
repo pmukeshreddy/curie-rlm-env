@@ -35,7 +35,7 @@ rollouts_per_example = 16
 [[orchestrator.train.env]]
 id = "curie-rlm-env"
 name = "continual_phase1_freeform_current"
-args = { phase = 1, split = "train", seed = 42 }
+args = { continual_phase = 1, split = "train", seed = 42 }
 
 [orchestrator.train.sampling]
 max_completion_tokens = 4096

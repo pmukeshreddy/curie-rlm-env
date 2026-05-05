@@ -59,25 +59,25 @@ def test_old_sequential_configs_removed():
         assert not (_CONFIGS / name).exists(), f"{name} must not remain as a training side path"
 
 
-def test_continual_phase1_config_uses_phase_env():
+def test_continual_phase1_config_uses_continual_phase_env():
     cfg = _load_toml("curie_grpo_continual_phase1.toml")
     envs = cfg["orchestrator"]["train"]["env"]
     assert len(envs) == 1
-    assert envs[0]["args"] == {"phase": 1, "split": "train", "seed": 42}
+    assert envs[0]["args"] == {"continual_phase": 1, "split": "train", "seed": 42}
 
 
-def test_continual_phase2_config_uses_phase_env():
+def test_continual_phase2_config_uses_continual_phase_env():
     cfg = _load_toml("curie_grpo_continual_phase2.toml")
     envs = cfg["orchestrator"]["train"]["env"]
     assert len(envs) == 1
-    assert envs[0]["args"] == {"phase": 2, "split": "train", "seed": 42}
+    assert envs[0]["args"] == {"continual_phase": 2, "split": "train", "seed": 42}
 
 
-def test_continual_phase3_config_uses_phase_env():
+def test_continual_phase3_config_uses_continual_phase_env():
     cfg = _load_toml("curie_grpo_continual_phase3.toml")
     envs = cfg["orchestrator"]["train"]["env"]
     assert len(envs) == 1
-    assert envs[0]["args"] == {"phase": 3, "split": "train", "seed": 42}
+    assert envs[0]["args"] == {"continual_phase": 3, "split": "train", "seed": 42}
 
 
 def test_training_configs_do_not_pass_single_task_ids():
@@ -125,6 +125,18 @@ def test_wandb_project_is_curie_rlm():
     for name in _CFG_NAMES:
         cfg = _load_toml(name)
         assert cfg["wandb"]["project"] == "curie-rlm"
+
+
+def test_datasets_declared_in_pyproject_dependencies():
+    pyproject = tomllib.loads((_PROJECT_ROOT / "pyproject.toml").read_text())
+    deps = pyproject["project"]["dependencies"]
+    assert any(dep.startswith("datasets>=") for dep in deps)
+
+
+def test_google_genai_declared_for_gemini_judge():
+    pyproject = tomllib.loads((_PROJECT_ROOT / "pyproject.toml").read_text())
+    deps = pyproject["project"]["dependencies"]
+    assert any(dep.startswith("google-genai>=") for dep in deps)
 
 
 # ---------------------------------------------------------------------------
@@ -190,16 +202,16 @@ def test_probe_script_imports():
 
 
 def test_continual_run_scripts_exist_and_executable():
-    for phase in (1, 2, 3):
-        path = _SCRIPTS / f"run_continual_phase{phase}.sh"
-        assert path.is_file(), f"run_continual_phase{phase}.sh missing"
+    for continual_phase in (1, 2, 3):
+        path = _SCRIPTS / f"run_continual_phase{continual_phase}.sh"
+        assert path.is_file(), f"run_continual_phase{continual_phase}.sh missing"
         mode = path.stat().st_mode
-        assert mode & stat.S_IXUSR, f"run_continual_phase{phase}.sh not user-executable"
+        assert mode & stat.S_IXUSR, f"run_continual_phase{continual_phase}.sh not user-executable"
 
 
 def test_old_sequential_run_scripts_removed():
-    for phase in (1, 2, 3):
-        path = _SCRIPTS / f"run_phase{phase}.sh"
+    for continual_phase in (1, 2, 3):
+        path = _SCRIPTS / f"run_phase{continual_phase}.sh"
         assert not path.exists(), f"{path.name} must not remain as a training side path"
 
 
@@ -213,7 +225,7 @@ def test_continual_replay_scripts_use_new_checkpoint_vars():
 
 
 def test_retrieval_replay_scripts_enable_judge_cache():
-    for phase in (2, 3):
-        text = (_SCRIPTS / f"run_continual_phase{phase}.sh").read_text()
+    for continual_phase in (2, 3):
+        text = (_SCRIPTS / f"run_continual_phase{continual_phase}.sh").read_text()
         assert "GEMINI_API_KEY" in text
         assert "CURIE_JUDGE_CACHE=1" in text

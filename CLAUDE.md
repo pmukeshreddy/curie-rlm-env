@@ -39,7 +39,7 @@ Stage 5 RL training is continual replay, not sequential family-only training:
 - Phase 1 — 100% current free-form tasks: DFT-C, HFE, HFD, QECC_65, GEO
 - Phase 2 — 70% current retrieval tasks (DFT-S, DFT-P, MPVE) + 30% Phase 1 replay
 - Phase 3 — 60% current geometric/structural tasks (BIOGR, PDB) + 20% Phase 1 replay + 20% Phase 2 replay
-Each phase resumes from the prior phase's checkpoint, and replay is part of the default training data path.
+Each continual phase resumes from the prior continual phase's checkpoint, and replay is part of the default training data path.
 
 Stage 5.5 RFT contingency:
 - Triggered only if Stage 5 continual Phase 1 stalls (no reward improvement over baseline + 0.05 in 500 steps, OR variance > 2x reward mean).

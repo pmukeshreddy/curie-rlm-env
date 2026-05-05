@@ -51,32 +51,32 @@ CONTINUAL_PHASES: dict[int, dict[str, Any]] = {
 }
 
 
-def validate_phase(phase: int) -> None:
+def validate_continual_phase(continual_phase: int) -> None:
     """Validate a continual phase id."""
-    if phase not in CONTINUAL_PHASES:
+    if continual_phase not in CONTINUAL_PHASES:
         raise ValueError(
-            f"Unknown continual phase: {phase!r}. Valid phases: {sorted(CONTINUAL_PHASES)}."
+            f"Unknown continual phase: {continual_phase!r}. Valid phases: {sorted(CONTINUAL_PHASES)}."
         )
 
 
-def component_tasks_for_phase(phase: int) -> dict[str, list[str]]:
+def component_tasks_for_continual_phase(continual_phase: int) -> dict[str, list[str]]:
     """Return current/replay component task lists for a continual phase."""
-    validate_phase(phase)
-    definition = CONTINUAL_PHASES[phase]
+    validate_continual_phase(continual_phase)
+    definition = CONTINUAL_PHASES[continual_phase]
     components: dict[str, list[str]] = {"current": list(definition["current"])}
     for name, task_ids in definition.get("replay", {}).items():
         components[name] = list(task_ids)
     return components
 
 
-def mixture_for_phase(phase: int) -> dict[str, float]:
+def mixture_for_continual_phase(continual_phase: int) -> dict[str, float]:
     """Return replay mixture weights for a continual phase."""
-    validate_phase(phase)
-    return dict(CONTINUAL_PHASES[phase]["mixture"])
+    validate_continual_phase(continual_phase)
+    return dict(CONTINUAL_PHASES[continual_phase]["mixture"])
 
 
-def _stable_seed(seed: int, phase: int, label: str) -> int:
-    digest = hashlib.sha256(f"{seed}:{phase}:{label}".encode("utf-8")).digest()
+def _stable_seed(seed: int, continual_phase: int, label: str) -> int:
+    digest = hashlib.sha256(f"{seed}:{continual_phase}:{label}".encode("utf-8")).digest()
     return int.from_bytes(digest[:8], "big")
 
 
@@ -114,7 +114,7 @@ def _row_from_dataset(
     index: int,
     task_id: str,
     component: str,
-    phase: int,
+    continual_phase: int,
     component_weight: float,
 ) -> dict[str, Any]:
     row = dict(dataset[index])
@@ -129,9 +129,11 @@ def _row_from_dataset(
         raise ValueError(f"CURIE row for task {task_id} is missing info.record_id.")
 
     annotated_info = dict(info)
-    annotated_info["continual_phase"] = phase
+    annotated_info["continual_phase"] = continual_phase
     annotated_info["continual_component"] = component
     annotated_info["continual_component_weight"] = component_weight
+    annotated_info["stream_role"] = "current" if component == "current" else "replay"
+    annotated_info["replay_source"] = component
     row["info"] = annotated_info
     return row
 
@@ -156,7 +158,7 @@ def _sample_rows(
 
 
 def mix_task_datasets(
-    phase: int,
+    continual_phase: int,
     task_datasets: Mapping[str, datasets.Dataset],
     seed: int = CONTINUAL_SEED,
 ) -> datasets.Dataset:
@@ -166,14 +168,16 @@ def mix_task_datasets(
     ratios. Replay samples are repeated real CURIE rows when the requested
     quota exceeds the replay source size.
     """
-    validate_phase(phase)
-    components = component_tasks_for_phase(phase)
-    mixture = mixture_for_phase(phase)
+    validate_continual_phase(continual_phase)
+    components = component_tasks_for_continual_phase(continual_phase)
+    mixture = mixture_for_continual_phase(continual_phase)
 
     component_rows: dict[str, list[dict[str, Any]]] = {}
     for component, task_ids in components.items():
         if component not in mixture:
-            raise ValueError(f"Continual component {component!r} is missing from phase {phase} mixture.")
+            raise ValueError(
+                f"Continual component {component!r} is missing from continual phase {continual_phase} mixture."
+            )
         rows: list[dict[str, Any]] = []
         for task_id in task_ids:
             if task_id not in task_datasets:
@@ -186,7 +190,7 @@ def mix_task_datasets(
                         index,
                         task_id,
                         component,
-                        phase,
+                        continual_phase,
                         mixture[component],
                     )
                 )
@@ -199,29 +203,29 @@ def mix_task_datasets(
             _sample_rows(
                 component_rows[component],
                 quotas[component],
-                _stable_seed(seed, phase, component),
+                _stable_seed(seed, continual_phase, component),
             )
         )
 
-    rng = random.Random(_stable_seed(seed, phase, "interleave"))
+    rng = random.Random(_stable_seed(seed, continual_phase, "interleave"))
     rng.shuffle(mixed_rows)
     return datasets.Dataset.from_list(mixed_rows)
 
 
-def load_continual_phase(
-    phase: int,
+def load_continual_phase_dataset(
+    continual_phase: int,
     split: str = "train",
     seed: int = CONTINUAL_SEED,
 ) -> datasets.Dataset:
     """Load and mix the CURIE dataset for one continual training phase."""
-    validate_phase(phase)
+    validate_continual_phase(continual_phase)
     task_ids = {
         task_id
-        for task_list in component_tasks_for_phase(phase).values()
+        for task_list in component_tasks_for_continual_phase(continual_phase).values()
         for task_id in task_list
     }
     task_datasets = {
         task_id: load_curie_task(task_id, split)
         for task_id in sorted(task_ids)
     }
-    return mix_task_datasets(phase, task_datasets, seed=seed)
+    return mix_task_datasets(continual_phase, task_datasets, seed=seed)

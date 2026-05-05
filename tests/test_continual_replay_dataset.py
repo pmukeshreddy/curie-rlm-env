@@ -50,6 +50,13 @@ def _signature(ds: datasets.Dataset) -> list[tuple[str, str, str]]:
     ]
 
 
+def _metadata_by_component(ds: datasets.Dataset) -> dict[str, dict]:
+    return {
+        row["info"]["continual_component"]: row["info"]
+        for row in ds
+    }
+
+
 def test_continual_phase_definitions_are_locked():
     assert cont.FREEFORM_TASKS == ["DFT-C", "HFE", "HFD", "QECC_65", "GEO"]
     assert cont.RETRIEVAL_TASKS == ["DFT-S", "DFT-P", "MPVE"]
@@ -96,7 +103,16 @@ def test_replay_rows_are_annotated_with_phase_and_weight():
         assert info["continual_component_weight"] in {0.70, 0.30}
 
 
-def test_load_continual_phase_uses_requested_split(monkeypatch):
+def test_replay_rows_include_stream_role_and_replay_source():
+    mixed = cont.mix_task_datasets(2, _all_task_datasets(), seed=42)
+    metadata = _metadata_by_component(mixed)
+    assert metadata["current"]["stream_role"] == "current"
+    assert metadata["current"]["replay_source"] == "current"
+    assert metadata["phase1"]["stream_role"] == "replay"
+    assert metadata["phase1"]["replay_source"] == "phase1"
+
+
+def test_load_continual_phase_dataset_uses_requested_split(monkeypatch):
     calls: list[tuple[str, str]] = []
 
     def fake_loader(task_id: str, split: str) -> datasets.Dataset:
@@ -104,7 +120,7 @@ def test_load_continual_phase_uses_requested_split(monkeypatch):
         return _mk_dataset(task_id)
 
     monkeypatch.setattr(cont, "load_curie_task", fake_loader)
-    mixed = cont.load_continual_phase(2, split="train", seed=42)
+    mixed = cont.load_continual_phase_dataset(2, split="train", seed=42)
     loaded_tasks = {task_id for task_id, split in calls}
     expected_tasks = set(cont.FREEFORM_TASKS + cont.RETRIEVAL_TASKS)
     assert loaded_tasks == expected_tasks

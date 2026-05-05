@@ -4,11 +4,11 @@
 set -euo pipefail
 
 if [[ -z "${PHASE1_STALLED_CKPT:-}" ]]; then
-    echo "ERROR: PHASE1_STALLED_CKPT env var required (path to stalled phase1 ckpt)" >&2
+    echo "ERROR: PHASE1_STALLED_CKPT env var required (path to stalled continual Phase 1 ckpt)" >&2
     exit 1
 fi
 if [[ -z "${ROLLOUTS_DIR:-}" ]]; then
-    echo "ERROR: ROLLOUTS_DIR env var required (where stalled phase1 wrote rollouts)" >&2
+    echo "ERROR: ROLLOUTS_DIR env var required (where stalled continual Phase 1 wrote rollouts)" >&2
     exit 1
 fi
 

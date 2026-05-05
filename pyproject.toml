@@ -10,6 +10,8 @@ dependencies = [
     "bert-score>=0.3",
     "biopython>=1.84",
     "Levenshtein>=0.25",
+    "datasets>=2.19",
+    "google-genai>=1.0",
 ]
 
 [build-system]

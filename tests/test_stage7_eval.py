@@ -108,6 +108,46 @@ def test_run_rlm_ablation_two_modes(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# eval_retention_forgetting
+# ---------------------------------------------------------------------------
+
+def test_eval_retention_forgetting_imports():
+    import eval_retention_forgetting as erf
+    assert callable(erf.compute_retention_forgetting)
+    assert callable(erf.write_retention_output)
+
+
+def test_eval_retention_forgetting_computes_phase_summaries(tmp_path):
+    import eval_retention_forgetting as erf
+    eval_data = _mk_eval_json(
+        ["baseline", "continual_phase1", "continual_phase2", "continual_phase3"],
+        [0.2, 0.6, 0.7, 0.8],
+        n=10,
+    )
+    for task_id in ("DFT-C", "HFE", "HFD", "QECC_65", "GEO"):
+        eval_data["per_checkpoint"]["continual_phase1"]["per_task"][task_id]["mean_reward"] = 0.9
+        eval_data["per_checkpoint"]["continual_phase3"]["per_task"][task_id]["mean_reward"] = 0.7
+
+    result = erf.compute_retention_forgetting(eval_data)
+    out = tmp_path / "retention.json"
+    erf.write_retention_output(result, out)
+    parsed = json.loads(out.read_text())
+
+    assert parsed["final_checkpoint"] == "continual_phase3"
+    assert parsed["per_task_final"]["DFT-C"]["forgetting"] == pytest.approx(0.2)
+    assert parsed["per_task_final"]["DFT-C"]["retention_ratio"] == pytest.approx(0.7 / 0.9)
+    assert len(parsed["phase_summaries"]) == 3
+
+
+def test_eval_retention_forgetting_hard_fails_on_missing_checkpoint():
+    import eval_retention_forgetting as erf
+    eval_data = _mk_eval_json(["baseline", "continual_phase1"], [0.2, 0.6], n=10)
+    with pytest.raises(KeyError) as exc_info:
+        erf.compute_retention_forgetting(eval_data)
+    assert "continual_phase2" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
 # generate_report
 # ---------------------------------------------------------------------------
 

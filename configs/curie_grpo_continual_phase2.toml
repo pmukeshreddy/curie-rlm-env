@@ -22,7 +22,7 @@ interval = 25
 keep_last = 3
 
 [model]
-name = "Qwen/Qwen3.5-7B-Instruct"  # phase2 OVERRIDDEN at CLI to phase1 ckpt path
+name = "Qwen/Qwen3.5-7B-Instruct"  # continual Phase 2 OVERRIDDEN at CLI to continual Phase 1 ckpt path
 ac = true
 
 [orchestrator]
@@ -32,7 +32,7 @@ rollouts_per_example = 4  # retrieval LLMSim bottleneck remains in-loop
 [[orchestrator.train.env]]
 id = "curie-rlm-env"
 name = "continual_phase2_retrieval_with_phase1_replay"
-args = { phase = 2, split = "train", seed = 42 }
+args = { continual_phase = 2, split = "train", seed = 42 }
 
 [orchestrator.train.sampling]
 max_completion_tokens = 4096

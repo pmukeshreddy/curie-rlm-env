@@ -24,7 +24,7 @@ interval = 25
 keep_last = 3
 
 [model]
-name = "Qwen/Qwen3.5-7B-Instruct"  # OVERRIDDEN at CLI to phase2 ckpt path
+name = "Qwen/Qwen3.5-7B-Instruct"  # OVERRIDDEN at CLI to continual Phase 2 ckpt path
 ac = true
 
 [orchestrator]
@@ -34,7 +34,7 @@ rollouts_per_example = 4  # Phase 2 retrieval replay keeps LLMSim in-loop
 [[orchestrator.train.env]]
 id = "curie-rlm-env"
 name = "continual_phase3_geometric_structural_with_replay"
-args = { phase = 3, split = "train", seed = 42 }
+args = { continual_phase = 3, split = "train", seed = 42 }
 
 [orchestrator.train.sampling]
 max_completion_tokens = 4096
