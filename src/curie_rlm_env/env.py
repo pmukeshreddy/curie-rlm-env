@@ -31,7 +31,7 @@ from .continual import CONTINUAL_SEED, load_continual_phase_dataset
 from .datasets import load_curie_task
 from .judge import make_gemini_judge_from_env
 from .local_executor import LocalDockerRLMExecutor
-from .local_sandbox import resolve_sandbox_backend
+from .local_sandbox import _dbg, resolve_sandbox_backend
 from .rubric import CurieRubric
 from .schema import validate_answer
 
@@ -174,6 +174,13 @@ class CurieRLMEnv(RLMEnv):
             )
         self._executor.sandbox_client.teardown(wait=False)
         self._executor = LocalDockerRLMExecutor(self)
+        _dbg(
+            f"CurieRLMEnv ready task_id={self.task_id} continual_phase={self.continual_phase} "
+            f"interception_url_override={self._interception_url_override!r} "
+            f"interception_port={self.interception_port} "
+            f"interception_bind={self._interception_bind_host} "
+            f"sandbox_client={type(self._executor.sandbox_client).__name__}"
+        )
 
     async def _setup_interception_and_register(
         self, state: State, rollout_id: str
@@ -183,13 +190,30 @@ class CurieRLMEnv(RLMEnv):
             self._interception_url_override = (
                 f"http://{self._curie_local_host}:{self.interception_port}"
             )
+            _dbg(
+                f"interception URL pinned after server bind: "
+                f"{self._interception_url_override} (rollout_id={rollout_id})"
+            )
         return await super()._setup_interception_and_register(state, rollout_id)
 
     @vf.stop
     async def answer_schema_valid(self, state: State) -> bool:
-        if "final_answer" not in state:
+        has_final = "final_answer" in state
+        ans = state.get("final_answer")
+        ans_repr = (ans[:120] + "…") if isinstance(ans, str) and len(ans) > 120 else repr(ans)
+        traj = state.get("trajectory") or []
+        _dbg(
+            f"answer_schema_valid rollout_id={state.get('rollout_id')!r} "
+            f"has_final_answer={has_final} answer={ans_repr} "
+            f"trajectory_turns={len(traj)} state_keys={sorted(state.keys())}"
+        )
+        if not has_final:
             return False
-        validate_answer(state["final_answer"])
+        try:
+            validate_answer(state["final_answer"])
+        except ValueError as exc:
+            _dbg(f"answer_schema_valid REJECT rollout_id={state.get('rollout_id')!r} reason={exc}")
+            raise
         return True
 
 

@@ -27,6 +27,7 @@ import io
 import logging
 import os
 import shlex
+import sys
 import tarfile
 import time
 import uuid
@@ -44,6 +45,22 @@ from prime_sandboxes import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# Debug tracing — turn off by setting CURIE_DEBUG=0. Output goes to stderr and is
+# tagged so it's grep-able in mixed prime-rl logs.
+def _debug_enabled() -> bool:
+    return os.environ.get("CURIE_DEBUG", "1").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _dbg(msg: str) -> None:
+    if _debug_enabled():
+        print(f"[CURIE-DEBUG] {msg}", file=sys.stderr, flush=True)
+
+
+def _short(text: Any, limit: int = 200) -> str:
+    s = text if isinstance(text, str) else repr(text)
+    return s if len(s) <= limit else s[:limit] + f"…(+{len(s) - limit})"
 
 
 @dataclass
@@ -141,6 +158,7 @@ class LocalDockerSandboxClient:
         cpu_cores = float(getattr(request, "cpu_cores", 1.0) or 1.0)
         start_command = getattr(request, "start_command", None) or "tail -f /dev/null"
         env = dict(getattr(request, "environment_vars", {}) or {})
+        _dbg(f"create id={sandbox_id} image={image} mem={memory_gb}g cpu={cpu_cores} start={start_command!r}")
 
         def _run() -> Any:
             return self._client.containers.run(
@@ -159,16 +177,20 @@ class LocalDockerSandboxClient:
         try:
             container = await asyncio.to_thread(_run)
         except Exception as exc:
+            _dbg(f"create FAILED id={sandbox_id} err={type(exc).__name__}: {exc}")
             raise APIError(f"Local Docker create failed: {exc}") from exc
         self._containers[sandbox_id] = container
+        _dbg(f"create OK id={sandbox_id} container_id={container.id[:12]} status={container.status}")
         return _SandboxRef(id=sandbox_id)
 
     async def wait_for_creation(self, sandbox_id: str, max_attempts: int = 120) -> _SandboxRef:
         # Containers go to "running" essentially immediately after `containers.run`.
         # We still poll briefly to cover slow image pulls and avoid a race against
         # the very first exec_run.
+        _dbg(f"wait_for_creation id={sandbox_id} max_attempts={max_attempts}")
         container = self._container(sandbox_id)
         deadline = time.monotonic() + max(1, max_attempts)  # max_attempts ≈ seconds budget
+        t0 = time.monotonic()
 
         def _refresh_status() -> str:
             container.reload()
@@ -177,12 +199,15 @@ class LocalDockerSandboxClient:
         while True:
             status = await asyncio.to_thread(_refresh_status)
             if status == "running":
+                _dbg(f"wait_for_creation OK id={sandbox_id} elapsed={time.monotonic()-t0:.2f}s")
                 return _SandboxRef(id=sandbox_id)
             if status in {"exited", "dead", "removing"}:
+                _dbg(f"wait_for_creation DEAD id={sandbox_id} status={status}")
                 raise APIError(
                     f"Local sandbox {sandbox_id} failed to start (status={status})"
                 )
             if time.monotonic() > deadline:
+                _dbg(f"wait_for_creation TIMEOUT id={sandbox_id} status={status}")
                 raise APIError(
                     f"Local sandbox {sandbox_id} not ready within {max_attempts}s"
                 )
@@ -190,6 +215,7 @@ class LocalDockerSandboxClient:
 
     # ------------------------------------------------------------------ delete
     async def delete(self, sandbox_id: str) -> dict:
+        _dbg(f"delete id={sandbox_id}")
         container = self._containers.pop(sandbox_id, None)
         if container is None:
             return {"id": sandbox_id, "status": "not_found"}
@@ -223,6 +249,7 @@ class LocalDockerSandboxClient:
         working_dir: Optional[str] = None,
         **_kwargs: Any,
     ) -> _CommandResponse:
+        _dbg(f"exec id={sandbox_id} wd={working_dir!r} timeout={timeout} cmd={_short(command, 160)!r}")
         container = self._container(sandbox_id)
         wrapped = command
         if working_dir:
@@ -243,8 +270,16 @@ class LocalDockerSandboxClient:
         try:
             exit_code, stdout_b, stderr_b = await asyncio.to_thread(_exec)
         except Exception as exc:
+            _dbg(f"exec FAILED id={sandbox_id} err={type(exc).__name__}: {exc}")
             raise APIError(f"Local exec failed in {sandbox_id}: {exc}") from exc
 
+        stdout = stdout_b.decode("utf-8", errors="replace")
+        stderr = stderr_b.decode("utf-8", errors="replace")
+        _dbg(
+            f"exec DONE id={sandbox_id} exit={exit_code} "
+            f"stdout_len={len(stdout)} stderr_len={len(stderr)} "
+            f"stdout_head={_short(stdout, 120)!r} stderr_head={_short(stderr, 120)!r}"
+        )
         # `timeout` returns 124 when it killed the child. Surface as CommandTimeoutError so
         # SandboxMixin's existing retry/error handling matches the hosted backend.
         if exit_code == 124:
@@ -253,8 +288,8 @@ class LocalDockerSandboxClient:
             )
         return _CommandResponse(
             exit_code=int(exit_code or 0),
-            stdout=stdout_b.decode("utf-8", errors="replace"),
-            stderr=stderr_b.decode("utf-8", errors="replace"),
+            stdout=stdout,
+            stderr=stderr,
         )
 
     # ------------------------------------------------------------------ upload
@@ -264,9 +299,11 @@ class LocalDockerSandboxClient:
         remote_path: str,
         local_path: str,
     ) -> dict:
+        _dbg(f"upload id={sandbox_id} {local_path!r} -> {remote_path!r}")
         container = self._container(sandbox_id)
         local = Path(local_path)
         if not local.exists():
+            _dbg(f"upload FAILED id={sandbox_id} local_missing={local_path!r}")
             raise FileNotFoundError(f"Local source missing: {local_path}")
 
         def _put() -> None:
@@ -325,12 +362,14 @@ class LocalDockerSandboxClient:
         remote_path: str,
         timeout: Optional[float] = None,
     ) -> _ReadFileResponse:
+        _dbg(f"read id={sandbox_id} path={remote_path!r}")
         container = self._container(sandbox_id)
 
         def _read() -> str:
             try:
                 stream, _stat = container.get_archive(remote_path)
             except Exception as exc:
+                _dbg(f"read NOT_FOUND id={sandbox_id} path={remote_path!r}")
                 raise SandboxFileNotFoundError(
                     f"Remote path {remote_path} not found in {sandbox_id}"
                 ) from exc

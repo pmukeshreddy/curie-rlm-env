@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING
 
 from verifiers.envs.experimental.rlm_env import RLMExecutor
 
-from .local_sandbox import LocalDockerSandboxClient
+from .local_sandbox import LocalDockerSandboxClient, _dbg
 
 if TYPE_CHECKING:
     from verifiers.envs.experimental.rlm_env import RLMEnv
@@ -41,6 +41,7 @@ class LocalDockerRLMExecutor(RLMExecutor):
         # that proxies to prime_sandboxes. Drop it and substitute the local one.
         self.sandbox_client.teardown(wait=False)
         self.sandbox_client = LocalDockerSandboxClient()
+        _dbg(f"LocalDockerRLMExecutor constructed env={type(env).__name__}")
 
     # ------------------------------------------------------------------ teardown
     def teardown_sandboxes(self) -> None:
@@ -60,6 +61,10 @@ class LocalDockerRLMExecutor(RLMExecutor):
         ``sync_client = SandboxClient(APIClient())`` block — registered sandbox
         ids are deleted via ``self.sandbox_client`` (the local one) instead.
         """
+        _dbg(
+            f"LocalDockerRLMExecutor.teardown sessions={len(self._sessions)} "
+            f"active_sandboxes={len(self.active_sandboxes)}"
+        )
         if self._sessions:
             sessions = list(self._sessions.values())
             self._sessions.clear()
