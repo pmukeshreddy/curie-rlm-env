@@ -114,11 +114,19 @@ def test_seq_len_accommodates_curie():
         assert cfg.get("seq_len", 0) >= 16384
 
 
-def test_activation_checkpointing_enabled():
-    # Stage 5a §11 OOM mitigation for 15k-token inputs
+def test_no_config_uses_invalid_model_ac_true():
+    invalid_model_ac = "ac" + " = " + "true"
+    for path in _CONFIGS.glob("*.toml"):
+        code = _stripped_code(path.read_text())
+        assert invalid_model_ac not in code, f"{path.name} uses invalid Prime-RL model.ac"
+
+
+def test_continual_activation_checkpointing_uses_trainer_model_ac():
+    # Prime-RL expects activation checkpointing under trainer.model.ac.
     for name in _CFG_NAMES:
         cfg = _load_toml(name)
-        assert cfg["model"]["ac"] is True
+        assert "ac" not in cfg["model"]
+        assert cfg["trainer"]["model"]["ac"] == {"freq": 1}
 
 
 def test_wandb_project_is_curie_rlm():

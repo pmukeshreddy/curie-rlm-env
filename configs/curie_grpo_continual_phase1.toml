@@ -24,7 +24,6 @@ keep_last = 3
 
 [model]
 name = "Qwen/Qwen3.5-7B-Instruct"
-ac = true  # activation checkpointing — Stage 5a §11 OOM mitigation for 15k-token inputs
 
 [orchestrator]
 batch_size = 64
@@ -44,6 +43,9 @@ max_completion_tokens = 4096
 # prime-rl defaults (DPPO+KL with DR-GRPO advantages):
 #   kl_tau, dppo_mask_high, dppo_mask_low, adv_tau
 # (NOT classical kl_coef, clip_range, beta — see AGENTS.md "Algorithm naming")
+
+[trainer.model.ac]
+freq = 1
 
 [trainer.optim]
 lr = 1e-6  # conservative for 7B + small data; tune up if reward gradient flat

@@ -26,11 +26,13 @@ keep_last = 2
 [model]
 # OVERRIDDEN at CLI to stalled continual Phase 1 checkpoint via --model.name
 name = "Qwen/Qwen3.5-7B-Instruct"
-ac = true  # activation checkpointing — Stage 5a §11 OOM mitigation
 
 [data]
 path = "outputs/rft/high_reward_rollouts.jsonl"
 format = "messages"  # per Stage 4a memo §3 — prime-rl SFT primary format
+
+[trainer.model.ac]
+freq = 1
 
 [trainer.optim]
 lr = 5e-7  # lower than Stage 5 continual Phase 1's 1e-6; SFT is more sensitive to overshoot

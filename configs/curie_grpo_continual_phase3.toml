@@ -25,7 +25,6 @@ keep_last = 3
 
 [model]
 name = "Qwen/Qwen3.5-7B-Instruct"  # OVERRIDDEN at CLI to continual Phase 2 ckpt path
-ac = true
 
 [orchestrator]
 batch_size = 64
@@ -41,6 +40,9 @@ max_completion_tokens = 4096
 
 [trainer]
 # prime-rl defaults: kl_tau, dppo_mask_high, dppo_mask_low, adv_tau
+
+[trainer.model.ac]
+freq = 1
 
 [trainer.optim]
 lr = 1e-6
