@@ -202,10 +202,26 @@ class CurieRLMEnv(RLMEnv):
         ans = state.get("final_answer")
         ans_repr = (ans[:120] + "…") if isinstance(ans, str) and len(ans) > 120 else repr(ans)
         traj = state.get("trajectory") or []
+        # Surface the rollout-level signals that explain WHY a trajectory might be empty.
+        # `prompt_too_long` and `is_truncated` are set by upstream RLMEnv; the
+        # root_llm_* and *_call_count fields tell us whether the root model and tools
+        # ran at all. `error` is the upstream rollout error (if any).
         _dbg(
             f"answer_schema_valid rollout_id={state.get('rollout_id')!r} "
             f"has_final_answer={has_final} answer={ans_repr} "
-            f"trajectory_turns={len(traj)} state_keys={sorted(state.keys())}"
+            f"trajectory_turns={len(traj)} "
+            f"root_llm_turns={state.get('root_llm_turns')!r} "
+            f"root_llm_prompt_tokens={state.get('root_llm_prompt_tokens')!r} "
+            f"root_llm_completion_tokens={state.get('root_llm_completion_tokens')!r} "
+            f"root_tool_call_count={state.get('root_tool_call_count')!r} "
+            f"sub_llm_call_count={state.get('sub_llm_call_count')!r} "
+            f"sub_llm_total_turns={state.get('sub_llm_total_turns')!r} "
+            f"is_completed={state.get('is_completed')!r} "
+            f"is_truncated={state.get('is_truncated')!r} "
+            f"prompt_too_long={state.get('prompt_too_long')!r} "
+            f"max_turns_in_context_stopped={state.get('max_turns_in_context_stopped')!r} "
+            f"error={state.get('error')!r} "
+            f"final_env_response={(repr(state.get('final_env_response'))[:200])!r}"
         )
         if not has_final:
             return False
