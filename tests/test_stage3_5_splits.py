@@ -242,6 +242,7 @@ def test_row_prompt_mentions_context_file_and_repl_workflow():
 
     user_text = row["prompt"][0]["content"]
     assert "context.txt" in user_text
+    assert "submit_answer" in user_text
     assert "answer" in user_text  # tells model how to set the final answer
     assert "ready" in user_text   # tells model how to signal completion
 

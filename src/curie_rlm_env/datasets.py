@@ -91,13 +91,21 @@ REQUIRED first call (copy-paste, then continue from there):
 
 Answer format for {task_id}: {answer_format}
 
-TO SUBMIT, call `call_python_repl` with EXACTLY:
+TO SUBMIT, make a top-level tool call to `submit_answer` with your final \
+answer string:
+
+    submit_answer(content=<your final answer as a string>)
+
+Do not call `submit_answer` from inside Python, and do not end with plain chat \
+text. If you are already inside `call_python_repl`, the equivalent answer-file \
+path is also valid:
 
     answer["content"] = <your final answer as a string>
     answer["ready"] = True
 
-The rollout ends the moment `answer["ready"] = True`. Do not write the \
-answer in chat — only `answer["content"]` is scored.
+The rollout ends the moment the answer file contains `{{"ready": true, \
+"content": "..."}}`. Do not write the answer in chat — only submitted content \
+is scored.
 """
 
 

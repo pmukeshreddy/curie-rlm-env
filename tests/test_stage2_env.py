@@ -12,6 +12,8 @@ Guard #4 — RLMMonitorRubric auto-attached
 Placeholder rubric: vf.Rubric() with no reward funcs (rubric.py:40 self.funcs = funcs or []).
 Stage 3 replaces with CurieRubric dispatcher.
 """
+import asyncio
+
 import datasets
 import pytest
 import verifiers as vf
@@ -43,6 +45,52 @@ def test_schema_rejects_non_string():
 def test_schema_accepts_valid_content():
     # M6: validator returns None on success
     assert validate_answer("The answer is 42.") is None
+
+
+def test_submit_answer_uses_worker_answer_contract():
+    """Quote from rlm_env.py: 'with open(ANSWER_FILE, "w", encoding="utf-8") as f:'."""
+    env = CurieRLMEnv.__new__(CurieRLMEnv)
+    calls = []
+
+    async def fake_execute_code(code, state_arg):
+        calls.append((code, state_arg))
+        return {"answer": {"ready": True, "content": "actual final answer"}}
+
+    env._execute_code = fake_execute_code
+    state = {"rollout_id": "rlm_unit"}
+
+    result = asyncio.run(env.submit_answer("actual final answer", state))
+
+    assert result == "Final answer submitted."
+    assert state["final_answer"] == "actual final answer"
+    assert calls == [
+        (
+            "answer['content'] = 'actual final answer'\nanswer['ready'] = True",
+            state,
+        )
+    ]
+
+
+def test_submit_answer_rejects_worker_mismatch():
+    """Quote from rlm_env.py: 'if answer_ready: state["final_answer"] = answer.get("content", "")'."""
+    env = CurieRLMEnv.__new__(CurieRLMEnv)
+
+    async def fake_execute_code(code, state_arg):
+        return {"answer": {"ready": False, "content": ""}}
+
+    env._execute_code = fake_execute_code
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(env.submit_answer("actual final answer", {"rollout_id": "rlm_unit"}))
+
+
+def test_submit_answer_injects_state_arg():
+    env = CurieRLMEnv.__new__(CurieRLMEnv)
+    state = {"rollout_id": "rlm_unit"}
+
+    updated = env.update_tool_args("submit_answer", {"content": "x"}, [], state)
+
+    assert updated == {"content": "x", "state": state}
 
 
 # -------- Guard #2 — llm_batch tool registration (1 test) --------------------

@@ -25,7 +25,7 @@ from urllib.parse import urlparse
 import yaml
 import verifiers as vf
 from verifiers.envs.experimental.rlm_env import RLMEnv
-from verifiers.types import State
+from verifiers.types import Messages, State
 
 from .continual import CONTINUAL_SEED, load_continual_phase_dataset
 from .datasets import load_curie_task
@@ -47,6 +47,7 @@ _INTERCEPTION_URL_ENV = "CURIE_LOCAL_INTERCEPTION_URL"
 _INTERCEPTION_HOST_ENV = "CURIE_LOCAL_INTERCEPTION_HOST"
 _INTERCEPTION_PORT_ENV = "CURIE_LOCAL_INTERCEPTION_PORT"
 _INTERCEPTION_BIND_ENV = "CURIE_LOCAL_INTERCEPTION_BIND"
+_SANDBOX_IMAGE_ENV = "CURIE_SANDBOX_DOCKER_IMAGE"
 
 _DEFAULT_LOCAL_HOST = "127.0.0.1"
 _DEFAULT_LOCAL_BIND = "127.0.0.1"
@@ -137,6 +138,10 @@ class CurieRLMEnv(RLMEnv):
             else None
         )
         rubric = CurieRubric(judge_client=judge_client)
+        sandbox_kwargs: dict[str, str] = {}
+        sandbox_image = os.environ.get(_SANDBOX_IMAGE_ENV)
+        if sandbox_image:
+            sandbox_kwargs["sandbox_docker_image"] = sandbox_image
         super().__init__(
             dataset=dataset,
             rubric=rubric,
@@ -156,6 +161,7 @@ class CurieRLMEnv(RLMEnv):
             sandbox_memory_gb=cfg["sandbox"]["sandbox_memory_gb"],
             code_execution_timeout=cfg["sandbox"]["code_execution_timeout"],
             abort_on_code_timeout=cfg["sandbox"]["abort_on_code_timeout"],
+            **sandbox_kwargs,
         )
         self.task_id = task_id if task_id is not None else f"continual_phase_{continual_phase}"
         self.continual_phase = continual_phase
@@ -184,6 +190,7 @@ class CurieRLMEnv(RLMEnv):
             )
         self._executor.sandbox_client.teardown(wait=False)
         self._executor = LocalDockerRLMExecutor(self)
+        self.add_tool(self.submit_answer, args_to_skip=["state"])
         _dbg(
             f"CurieRLMEnv ready task_id={self.task_id} continual_phase={self.continual_phase} "
             f"interception_url_override={self._interception_url_override!r} "
@@ -205,6 +212,40 @@ class CurieRLMEnv(RLMEnv):
                 f"{self._interception_url_override} (rollout_id={rollout_id})"
             )
         return await super()._setup_interception_and_register(state, rollout_id)
+
+    def update_tool_args(
+        self,
+        tool_name: str,
+        tool_args: dict,
+        messages: Messages,
+        state: State,
+        **kwargs,
+    ) -> dict:
+        if tool_name == "submit_answer":
+            updated_args = dict(tool_args)
+            updated_args["state"] = state
+            return updated_args
+        return super().update_tool_args(tool_name, tool_args, messages, state, **kwargs)
+
+    async def submit_answer(self, content: str, state: State) -> str:
+        """Submit the final CURIE answer through RLMEnv's Python worker."""
+        validate_answer(content)
+        result = await self._execute_code(
+            "\n".join(
+                [
+                    f"answer['content'] = {content!r}",
+                    "answer['ready'] = True",
+                ]
+            ),
+            state,
+        )
+        answer = result.get("answer", {})
+        if not answer.get("ready") or answer.get("content") != content:
+            raise RuntimeError(
+                "submit_answer failed: RLM worker did not return matching ready answer"
+            )
+        state["final_answer"] = answer["content"]
+        return "Final answer submitted."
 
     @vf.stop
     async def answer_schema_valid(self, state: State) -> bool:

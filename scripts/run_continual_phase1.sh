@@ -21,6 +21,8 @@ ulimit -n 32000
 # Local interception defaults — single-pod mode.
 # Override CURIE_LOCAL_INTERCEPTION_BIND=0.0.0.0 if the sandbox runs in a separate
 # network namespace (e.g. docker bridge) and needs to reach the env worker via gateway.
+# Build docker/sandbox.Dockerfile and set CURIE_SANDBOX_DOCKER_IMAGE to that tag
+# when the base python:3.11-slim image cannot install requests during rollout setup.
 export CURIE_LOCAL_INTERCEPTION_HOST="${CURIE_LOCAL_INTERCEPTION_HOST:-127.0.0.1}"
 export CURIE_LOCAL_INTERCEPTION_BIND="${CURIE_LOCAL_INTERCEPTION_BIND:-127.0.0.1}"
 export CURIE_SANDBOX_BACKEND="${CURIE_SANDBOX_BACKEND:-local_docker}"

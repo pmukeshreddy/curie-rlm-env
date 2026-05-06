@@ -84,6 +84,19 @@ def test_continual_phase1_does_not_build_gemini_judge(monkeypatch):
     assert _curie_rubric_from_env(env)._judge_client is None
 
 
+def test_sandbox_docker_image_env_override(monkeypatch):
+    monkeypatch.setenv("CURIE_SANDBOX_DOCKER_IMAGE", "curie-rlm-sandbox:unit")
+    monkeypatch.setattr(
+        env_mod,
+        "load_continual_phase_dataset",
+        lambda continual_phase, split, seed: _mk_dataset("DFT-C"),
+    )
+
+    env = env_mod.load_environment(continual_phase=1, split="train")
+
+    assert env.sandbox_docker_image == "curie-rlm-sandbox:unit"
+
+
 def test_phase_keyword_removed_from_public_training_entrypoint():
     with pytest.raises(TypeError):
         env_mod.load_environment(phase=2, split="train")
