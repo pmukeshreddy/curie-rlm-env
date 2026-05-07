@@ -49,3 +49,10 @@ lr = 1e-6
 
 [inference.parallel]
 # TUNE PER POD AVAILABILITY
+
+[inference.model]
+# REQUIRED for Qwen3 tool calling — see configs/curie_grpo_continual_phase1.toml
+# for the full reasoning. Without these, no tool calls fire and every rollout
+# ends with has_final_answer=False.
+enable_auto_tool_choice = true
+tool_call_parser = "hermes"
