@@ -161,19 +161,32 @@ async def _main_async(args: argparse.Namespace) -> int:
                 "error": state.get("error"),
             })
 
-    # Summary table
+    # Summary table — short columns first; full error dumps below.
     print()
     print("=" * 96)
-    print(f"{'ex':>3} {'r':>3} {'has_final':>10} {'submit':>7} {'turns':>5} {'reward':>8}  error")
+    print(f"{'ex':>3} {'r':>3} {'has_final':>10} {'submit':>7} {'turns':>5} {'reward':>8}  error_short")
     print("-" * 96)
     for r in rows:
         rew = f"{r['reward']:.3f}" if isinstance(r["reward"], (int, float)) else str(r["reward"])
-        err = (str(r["error"])[:40] + "…") if r["error"] and len(str(r["error"])) > 40 else (r["error"] or "")
+        err_short = (str(r["error"])[:40] + "…") if r["error"] and len(str(r["error"])) > 40 else (r["error"] or "")
         print(
             f"{str(r['example']):>3} {str(r['rollout']):>3} {str(r['has_final_answer']):>10} "
-            f"{str(r['submit_calls']):>7} {str(r['n_turns']):>5} {rew:>8}  {err}"
+            f"{str(r['submit_calls']):>7} {str(r['n_turns']):>5} {rew:>8}  {err_short}"
         )
     print("=" * 96)
+
+    # Full per-row error dump — the truncated `error_short` above is useless
+    # when the error is a chained ModelError with HTTP status + server body.
+    print("\nFULL ERROR DUMPS:")
+    for r in rows:
+        if not r["error"]:
+            continue
+        print(f"  example={r['example']} rollout={r['rollout']}")
+        if isinstance(r["error"], dict):
+            for k, v in r["error"].items():
+                print(f"    {k}: {v}")
+        else:
+            print(f"    {r['error']}")
 
     n_with_answer = sum(1 for r in rows if r["has_final_answer"] is True)
     n_with_submit = sum(
