@@ -305,15 +305,18 @@ class CurieRLMEnv(RLMEnv):
                     tool_calls = getattr(last_msg, "tool_calls", None) or (last_msg.get("tool_calls") if isinstance(last_msg, dict) else None)
                     content_head = ""
                     if isinstance(content, str):
-                        content_head = content[:200]
+                        content_head = content[:600]
                     elif isinstance(content, list):
-                        content_head = repr(content)[:200]
+                        content_head = repr(content)[:600]
                     tc_summary: list[str] = []
                     if tool_calls:
                         for tc in tool_calls:
                             tc_name = getattr(tc, "name", None) or (tc.get("name") if isinstance(tc, dict) else None)
                             tc_args = getattr(tc, "arguments", None) or (tc.get("arguments") if isinstance(tc, dict) else None)
-                            tc_summary.append(f"{tc_name}({(repr(tc_args)[:80])})")
+                            # 80 chars was hiding what the model was actually doing
+                            # (we couldn't tell if model was attempting answer["ready"]=True
+                            # inside the python code or just looping print()s).
+                            tc_summary.append(f"{tc_name}({(repr(tc_args)[:1500])})")
                     last_assistant_summary = (
                         f"role={role!r} content_head={content_head!r} "
                         f"tool_calls=[{', '.join(tc_summary) if tc_summary else 'NONE'}]"

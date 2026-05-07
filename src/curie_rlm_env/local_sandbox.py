@@ -278,7 +278,7 @@ class LocalDockerSandboxClient:
         _dbg(
             f"exec DONE id={sandbox_id} exit={exit_code} "
             f"stdout_len={len(stdout)} stderr_len={len(stderr)} "
-            f"stdout_head={_short(stdout, 120)!r} stderr_head={_short(stderr, 120)!r}"
+            f"stdout_head={_short(stdout, 1500)!r} stderr_head={_short(stderr, 1500)!r}"
         )
         # `timeout` returns 124 when it killed the child. Surface as CommandTimeoutError so
         # SandboxMixin's existing retry/error handling matches the hosted backend.
