@@ -53,16 +53,6 @@ lr = 1e-6  # conservative for 7B + small data; tune up if reward gradient flat
 [inference.parallel]
 # TUNE PER POD AVAILABILITY
 
-[inference.model]
-# REQUIRED for Qwen3 tool calling. Without these, vLLM serves Qwen3's
-# `<tool_call>...</tool_call>` Hermes-style XML as plain text in `content`,
-# `tool_calls` comes back None, verifiers env_response sees no tool calls,
-# and the model can never invoke `call_python_repl` or `submit_answer` —
-# every rollout ends with `final_answer` unset (`has_final_answer=False`).
-# Pattern matches prime-rl's own examples/wiki_search/rl.toml for Qwen3.
-enable_auto_tool_choice = true
-tool_call_parser = "hermes"
-
 # No vllm_extra needed. The RLM-shaped dataset rows (see src/curie_rlm_env/datasets.py)
 # put the long CURIE input into the sandbox filesystem at <rlm_fs_root>/context.txt;
 # the visible root prompt is a ~200-token task instruction. Qwen3-8B's native 40960
