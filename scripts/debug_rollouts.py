@@ -108,7 +108,6 @@ async def _main_async(args: argparse.Namespace) -> int:
         "max_tokens": args.max_tokens,
         "temperature": args.temperature,
     }
-    sem = asyncio.Semaphore(2)
 
     n_examples = min(args.num_examples, len(env.dataset))
     rows: list[dict[str, Any]] = []
@@ -121,6 +120,10 @@ async def _main_async(args: argparse.Namespace) -> int:
         with open(log_path, "w") as log_fh:
             with contextlib.redirect_stderr(log_fh):
                 try:
+                    # Signature on the pod's verifiers (confirmed via TypeError):
+                    #   run_group(group_inputs, client, model, sampling_args, ...)
+                    # `sampling_args` is positional/required; older `gen_sampling_args`
+                    # / `gen_sem` / `score_sem` kwargs are NOT in this version.
                     states = await env.run_group(
                         group_inputs=[
                             vf.RolloutInput(**example)
@@ -128,9 +131,7 @@ async def _main_async(args: argparse.Namespace) -> int:
                         ],
                         client=client,
                         model=args.model,
-                        gen_sampling_args=sampling_args,
-                        gen_sem=sem,
-                        score_sem=sem,
+                        sampling_args=sampling_args,
                     )
                 except Exception as exc:  # noqa: BLE001
                     traceback.print_exc(file=sys.stderr)
