@@ -159,7 +159,52 @@ async def _main_async(args: argparse.Namespace) -> int:
                 "n_turns": len(state.get("trajectory") or []),
                 "reward": state.get("reward"),
                 "error": state.get("error"),
+                "trajectory": state.get("trajectory") or [],
+                "final_answer": state.get("final_answer"),
             })
+
+
+def _dump_trajectory(r: dict[str, Any]) -> None:
+    """Print the full per-turn record: prompt, assistant message, tool calls, tool responses."""
+    traj = r.get("trajectory") or []
+    print(f"\n--- TRAJECTORY example={r['example']} rollout={r['rollout']} "
+          f"({len(traj)} turns) ---")
+    for t_idx, step in enumerate(traj):
+        prompt = step.get("prompt") if isinstance(step, dict) else None
+        completion = step.get("completion") if isinstance(step, dict) else None
+        print(f"\n  [turn {t_idx}]")
+        if prompt:
+            # prompt is the messages going INTO the model on this turn
+            for m_idx, m in enumerate(prompt if isinstance(prompt, list) else [prompt]):
+                role = (getattr(m, "role", None)
+                        or (m.get("role") if isinstance(m, dict) else None))
+                content = (getattr(m, "content", None)
+                           or (m.get("content") if isinstance(m, dict) else None))
+                content_repr = str(content)[:400] if content else ""
+                print(f"    PROMPT[{m_idx}] role={role!r} content={content_repr!r}")
+        if completion:
+            # completion is what the model produced on this turn (assistant + tool messages)
+            comp_list = completion if isinstance(completion, list) else [completion]
+            for m_idx, m in enumerate(comp_list):
+                role = (getattr(m, "role", None)
+                        or (m.get("role") if isinstance(m, dict) else None))
+                content = (getattr(m, "content", None)
+                           or (m.get("content") if isinstance(m, dict) else None))
+                tool_calls = (getattr(m, "tool_calls", None)
+                              or (m.get("tool_calls") if isinstance(m, dict) else None))
+                content_repr = str(content)[:600] if content else ""
+                print(f"    COMPL[{m_idx}] role={role!r} content={content_repr!r}")
+                if tool_calls:
+                    for tc_idx, tc in enumerate(tool_calls):
+                        tc_name = (getattr(tc, "name", None)
+                                   or (tc.get("name") if isinstance(tc, dict) else None))
+                        tc_args = (getattr(tc, "arguments", None)
+                                   or (tc.get("arguments") if isinstance(tc, dict) else None))
+                        print(f"      tool_call[{tc_idx}] name={tc_name!r} "
+                              f"arguments={str(tc_args)[:400]!r}")
+                else:
+                    print(f"      tool_calls=NONE")
+    print(f"\n  final_answer={r.get('final_answer')!r}")
 
     # Summary table — short columns first; full error dumps below.
     print()
@@ -188,13 +233,20 @@ async def _main_async(args: argparse.Namespace) -> int:
         else:
             print(f"    {r['error']}")
 
+    # Full per-turn dump: prompt, assistant content, tool calls, tool responses.
+    print("\nFULL TRAJECTORIES:")
+    for r in rows:
+        if "trajectory" in r:
+            _dump_trajectory(r)
+
     n_with_answer = sum(1 for r in rows if r["has_final_answer"] is True)
     n_with_submit = sum(
         1 for r in rows if isinstance(r["submit_calls"], int) and r["submit_calls"] > 0
     )
     print(f"\n{n_with_answer}/{len(rows)} rollouts produced has_final_answer=True")
     print(f"{n_with_submit}/{len(rows)} rollouts called submit_answer at least once")
-    print(f"\nNext: grep '[CURIE-DEBUG]' {out_dir}/example_*.stderr.log | head -40")
+    print(f"\n[CURIE-DEBUG] env+sandbox traces are in {out_dir}/example_*.stderr.log")
+    print(f"  grep '\\[CURIE-DEBUG\\]' {out_dir}/example_*.stderr.log")
     return 0
 
 
