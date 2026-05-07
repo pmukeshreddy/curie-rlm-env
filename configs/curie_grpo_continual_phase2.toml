@@ -47,3 +47,12 @@ lr = 1e-6
 
 [inference.parallel]
 # TUNE PER POD AVAILABILITY
+
+[inference.model]
+# Qwen3-8B + RLMEnv tool-calling — see configs/curie_grpo_continual_phase1.toml
+# for the full evidence chain. All three flags required together for the
+# model to call submit_answer instead of looping on the RLMEnv .messages
+# example code in <SCAFFOLDING>.
+enable_auto_tool_choice = true
+tool_call_parser = "hermes"
+reasoning_parser = "deepseek_r1"
