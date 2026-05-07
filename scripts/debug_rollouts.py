@@ -33,11 +33,35 @@ import traceback
 from pathlib import Path
 from typing import Any
 
+import httpx
 import verifiers as vf
+from openai import AsyncOpenAI
 
-# prime-rl client wiring — same imports the orchestrator uses.
-from prime_rl.utils.client import setup_clients
-from prime_rl.utils.config import ClientConfig
+
+def _make_async_openai_like_prime_rl(
+    base_url: str,
+    api_key_var: str,
+    timeout_seconds: int = 1200,
+) -> AsyncOpenAI:
+    """Construct AsyncOpenAI exactly as prime_rl.utils.client.setup_clients does.
+
+    Inlined (not imported) because the pod's prime-rl version splits configs
+    into a sub-package (prime-rl-configs) and the import path for ClientConfig
+    differs across releases. The body below mirrors setup_clients verbatim:
+    same httpx limits, same timeout shape, same max_retries, same EMPTY
+    fallback for the api key. If the orchestrator can hit the vLLM server,
+    so can this client.
+    """
+    http_client = httpx.AsyncClient(
+        limits=httpx.Limits(max_connections=8192, max_keepalive_connections=8192),
+        timeout=httpx.Timeout(timeout_seconds),
+    )
+    return AsyncOpenAI(
+        base_url=base_url,
+        api_key=os.getenv(api_key_var, "EMPTY"),
+        max_retries=10,
+        http_client=http_client,
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -65,11 +89,10 @@ async def _main_async(args: argparse.Namespace) -> int:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # prime-rl's actual client setup. Returns a list[AsyncOpenAI].
-    client_config = ClientConfig(base_url=[args.base_url], api_key_var=args.api_key_var)
-    clients = setup_clients(client_config)
-    client = clients[0]
-    print(f"[debug] client wired via prime_rl.utils.client.setup_clients "
+    # AsyncOpenAI built the same way prime_rl.utils.client.setup_clients does
+    # (inlined — see _make_async_openai_like_prime_rl docstring for why).
+    client = _make_async_openai_like_prime_rl(args.base_url, args.api_key_var)
+    print(f"[debug] AsyncOpenAI client built (matches prime-rl's setup_clients) "
           f"base_url={args.base_url} model={args.model}")
 
     env = vf.load_environment(
