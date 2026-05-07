@@ -53,25 +53,6 @@ lr = 1e-6  # conservative for 7B + small data; tune up if reward gradient flat
 [inference.parallel]
 # TUNE PER POD AVAILABILITY
 
-[inference.model]
-# Qwen3-8B + RLMEnv tool-calling — these three flags are required together.
-# Verified via scripts/debug_rollouts.sh on 2026-05-07: WITHOUT them
-# rollouts loop on the .messages example code in RLMEnv's <SCAFFOLDING>
-# system message and never call submit_answer; WITH them the model
-# reasons in <think>...</think> (extracted to reasoning_content), plans,
-# and calls submit_answer with a real answer on turn 2.
-#
-# - enable_auto_tool_choice + tool_call_parser hermes: required for vLLM
-#   to parse Qwen3's <tool_call>...</tool_call> output into structured
-#   tool_calls. Without these, tool calls come back as raw content text.
-# - reasoning_parser deepseek_r1: required to keep <think> blocks out of
-#   response.content when we removed /no_think from the prompt template
-#   (datasets.py). Without it, reasoning text pollutes content and
-#   breaks downstream parsing.
-enable_auto_tool_choice = true
-tool_call_parser = "hermes"
-reasoning_parser = "deepseek_r1"
-
 # No vllm_extra needed. The RLM-shaped dataset rows (see src/curie_rlm_env/datasets.py)
 # put the long CURIE input into the sandbox filesystem at <rlm_fs_root>/context.txt;
 # the visible root prompt is a ~200-token task instruction. Qwen3-8B's native 40960
