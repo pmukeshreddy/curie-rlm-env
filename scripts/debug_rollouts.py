@@ -91,8 +91,12 @@ async def _main_async(args: argparse.Namespace) -> int:
 
     # AsyncOpenAI built the same way prime_rl.utils.client.setup_clients does
     # (inlined — see _make_async_openai_like_prime_rl docstring for why).
-    client = _make_async_openai_like_prime_rl(args.base_url, args.api_key_var)
-    print(f"[debug] AsyncOpenAI client built (matches prime-rl's setup_clients) "
+    async_openai = _make_async_openai_like_prime_rl(args.base_url, args.api_key_var)
+    # The pod's verifiers env.run_group calls resolve_client(client), which on
+    # this version rejects raw AsyncOpenAI ("Unsupported client type"). Wrap
+    # it in vf.OpenAIChatCompletionsClient so resolve_client accepts it.
+    client = vf.OpenAIChatCompletionsClient(async_openai)
+    print(f"[debug] vf.OpenAIChatCompletionsClient wrapping AsyncOpenAI "
           f"base_url={args.base_url} model={args.model}")
 
     env = vf.load_environment(
