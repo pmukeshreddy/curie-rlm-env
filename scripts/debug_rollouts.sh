@@ -33,6 +33,7 @@ uv run --project "${PRIME_RL_PROJECT}" \
     vllm serve "${MODEL_NAME}" \
     --port "${VLLM_PORT}" \
     --enable-auto-tool-choice --tool-call-parser hermes \
+    --reasoning-parser deepseek_r1 \
     > "${VLLM_LOG}" 2>&1 &
 VLLM_PID=$!
 

@@ -65,8 +65,6 @@ _ANSWER_FORMAT_HINT: dict[str, str] = {
 }
 
 _TASK_PROMPT_TEMPLATE = """\
-/no_think
-
 CURIE task: {task_id} (difficulty={difficulty}).
 
 You CANNOT see the input directly. The long-context input is on disk at \
