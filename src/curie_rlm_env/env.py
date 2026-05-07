@@ -196,7 +196,9 @@ class CurieRLMEnv(RLMEnv):
             f"interception_url_override={self._interception_url_override!r} "
             f"interception_port={self.interception_port} "
             f"interception_bind={self._interception_bind_host} "
-            f"sandbox_client={type(self._executor.sandbox_client).__name__}"
+            f"sandbox_client={type(self._executor.sandbox_client).__name__} "
+            f"tool_map_keys={sorted(self.tool_map.keys())} "
+            f"tool_defs_count={len(self.tool_defs) if self.tool_defs else 0}"
         )
 
     async def _setup_interception_and_register(
@@ -222,6 +224,15 @@ class CurieRLMEnv(RLMEnv):
         **kwargs,
     ) -> dict:
         if tool_name == "submit_answer":
+            content_arg = tool_args.get("content", "")
+            content_head = content_arg[:120] if isinstance(content_arg, str) else repr(content_arg)[:120]
+            _dbg(
+                f"update_tool_args submit_answer rollout_id={state.get('rollout_id')!r} "
+                f"tool_args_keys={sorted(tool_args.keys())} "
+                f"content_type={type(content_arg).__name__} "
+                f"content_len={len(content_arg) if isinstance(content_arg, str) else 'n/a'} "
+                f"content_head={content_head!r}"
+            )
             updated_args = dict(tool_args)
             updated_args["state"] = state
             return updated_args
@@ -229,6 +240,14 @@ class CurieRLMEnv(RLMEnv):
 
     async def submit_answer(self, content: str, state: State) -> str:
         """Submit the final CURIE answer through RLMEnv's Python worker."""
+        state["_curie_submit_answer_calls"] = state.get("_curie_submit_answer_calls", 0) + 1
+        _dbg(
+            f"submit_answer ENTRY rollout_id={state.get('rollout_id')!r} "
+            f"call_n={state['_curie_submit_answer_calls']} "
+            f"content_type={type(content).__name__} "
+            f"content_len={len(content) if isinstance(content, str) else 'n/a'} "
+            f"content_head={(content[:120] if isinstance(content, str) else repr(content)[:120])!r}"
+        )
         validate_answer(content)
         result = await self._execute_code(
             "\n".join(
@@ -240,11 +259,30 @@ class CurieRLMEnv(RLMEnv):
             state,
         )
         answer = result.get("answer", {})
+        result_keys = sorted(result.keys()) if isinstance(result, dict) else type(result).__name__
+        answer_keys = sorted(answer.keys()) if isinstance(answer, dict) else type(answer).__name__
+        ready_flag = answer.get("ready") if isinstance(answer, dict) else None
+        returned_content = answer.get("content") if isinstance(answer, dict) else None
+        content_matches = returned_content == content
+        _dbg(
+            f"submit_answer EXEC_RESULT rollout_id={state.get('rollout_id')!r} "
+            f"result_keys={result_keys} answer_keys={answer_keys} "
+            f"ready={ready_flag!r} content_matches={content_matches} "
+            f"returned_content_len={len(returned_content) if isinstance(returned_content, str) else 'n/a'}"
+        )
         if not answer.get("ready") or answer.get("content") != content:
+            _dbg(
+                f"submit_answer RAISE rollout_id={state.get('rollout_id')!r} "
+                f"reason=worker_round_trip_mismatch ready={ready_flag!r} content_matches={content_matches}"
+            )
             raise RuntimeError(
                 "submit_answer failed: RLM worker did not return matching ready answer"
             )
         state["final_answer"] = answer["content"]
+        _dbg(
+            f"submit_answer SUCCESS rollout_id={state.get('rollout_id')!r} "
+            f"final_answer_len={len(state['final_answer'])}"
+        )
         return "Final answer submitted."
 
     @vf.stop
@@ -253,13 +291,46 @@ class CurieRLMEnv(RLMEnv):
         ans = state.get("final_answer")
         ans_repr = (ans[:120] + "…") if isinstance(ans, str) and len(ans) > 120 else repr(ans)
         traj = state.get("trajectory") or []
+
+        # Last assistant message — text + tool_calls. Tells us whether the model
+        # tried to call submit_answer at all and what shape its output had.
+        last_assistant_summary = "n/a"
+        try:
+            if traj:
+                last_completion = traj[-1].get("completion") if isinstance(traj[-1], dict) else None
+                if isinstance(last_completion, list) and last_completion:
+                    last_msg = last_completion[-1]
+                    role = getattr(last_msg, "role", None) or (last_msg.get("role") if isinstance(last_msg, dict) else None)
+                    content = getattr(last_msg, "content", None) or (last_msg.get("content") if isinstance(last_msg, dict) else None)
+                    tool_calls = getattr(last_msg, "tool_calls", None) or (last_msg.get("tool_calls") if isinstance(last_msg, dict) else None)
+                    content_head = ""
+                    if isinstance(content, str):
+                        content_head = content[:200]
+                    elif isinstance(content, list):
+                        content_head = repr(content)[:200]
+                    tc_summary: list[str] = []
+                    if tool_calls:
+                        for tc in tool_calls:
+                            tc_name = getattr(tc, "name", None) or (tc.get("name") if isinstance(tc, dict) else None)
+                            tc_args = getattr(tc, "arguments", None) or (tc.get("arguments") if isinstance(tc, dict) else None)
+                            tc_summary.append(f"{tc_name}({(repr(tc_args)[:80])})")
+                    last_assistant_summary = (
+                        f"role={role!r} content_head={content_head!r} "
+                        f"tool_calls=[{', '.join(tc_summary) if tc_summary else 'NONE'}]"
+                    )
+        except Exception as exc:  # debug-only — never let log-shaping break the rollout
+            last_assistant_summary = f"<extract_error: {type(exc).__name__}: {exc}>"
+
         # Surface the rollout-level signals that explain WHY a trajectory might be empty.
         # `prompt_too_long` and `is_truncated` are set by upstream RLMEnv; the
         # root_llm_* and *_call_count fields tell us whether the root model and tools
-        # ran at all. `error` is the upstream rollout error (if any).
+        # ran at all. `error` is the upstream rollout error (if any). submit_answer_calls
+        # is the CurieRLMEnv-only counter — proves whether the model actually invoked the tool.
         _dbg(
             f"answer_schema_valid rollout_id={state.get('rollout_id')!r} "
             f"has_final_answer={has_final} answer={ans_repr} "
+            f"submit_answer_calls={state.get('_curie_submit_answer_calls', 0)} "
+            f"tool_map_keys={sorted(self.tool_map.keys())} "
             f"trajectory_turns={len(traj)} "
             f"root_llm_turns={state.get('root_llm_turns')!r} "
             f"root_llm_prompt_tokens={state.get('root_llm_prompt_tokens')!r} "
@@ -272,7 +343,8 @@ class CurieRLMEnv(RLMEnv):
             f"prompt_too_long={state.get('prompt_too_long')!r} "
             f"max_turns_in_context_stopped={state.get('max_turns_in_context_stopped')!r} "
             f"error={state.get('error')!r} "
-            f"final_env_response={(repr(state.get('final_env_response'))[:200])!r}"
+            f"final_env_response={(repr(state.get('final_env_response'))[:200])!r} "
+            f"last_assistant={last_assistant_summary}"
         )
         if not has_final:
             return False
