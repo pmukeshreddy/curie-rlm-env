@@ -20,7 +20,8 @@ name = "continual_phase1_freeform_qwen3_5_7b"
 
 [ckpt]
 interval = 25
-keep_last = 3
+keep_last = 2  # each Qwen3-8B ckpt is ~92 GB; keep_last=2 caps at 184 GB
+               # (was 3 = 276 GB; pod is 388 GB so 3 + broadcasts overflowed)
 
 [model]
 name = "Qwen/Qwen3-8B"
