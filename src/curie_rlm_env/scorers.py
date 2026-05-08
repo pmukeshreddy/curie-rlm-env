@@ -7,6 +7,7 @@ documented inline and in CLAUDE.md "Documented Deviations from Curie".
 from __future__ import annotations
 
 import math
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable
 
@@ -14,7 +15,7 @@ import json5
 import numpy as np
 from Bio import Align
 from rouge_score import rouge_scorer
-from bert_score import score as _bert_score_compute
+from bert_score import BERTScorer
 import Levenshtein
 
 
@@ -27,24 +28,57 @@ def _prepare_summary_rouge(summary: str) -> str:
     return summary
 
 
+_ROUGE_SCORE_KEYS = ("rouge1", "rouge2", "rougeLsum")
+_ROUGE_SCORER = rouge_scorer.RougeScorer(list(_ROUGE_SCORE_KEYS))
+
+
+# lru_cache dedupes the rubric's twin call sites — _rouge_freeform_reward
+# (headline, weight 0.5) and _aux_rouge_lsum (weight-0 monitor) hit the same
+# (pred, ref) per rollout, so without caching every rollout pays 2× the work.
+# maxsize=128 caps RAM at ~1-2 MB and is well above the ~32 rollouts/step.
+# Module-level _ROUGE_SCORER avoids reconstructing the tokenizer/stopword
+# state on every cache miss.
+@lru_cache(maxsize=128)
 def rouge_l(pred: str, ref: str) -> dict[str, float]:
     """ROUGE-1, ROUGE-2, ROUGE-Lsum F-measure × 100. Verbatim Curie cell 22."""
-    score_keys = ["rouge1", "rouge2", "rougeLsum"]
-    scorer = rouge_scorer.RougeScorer(score_keys)
     target = _prepare_summary_rouge(ref)
     prediction = _prepare_summary_rouge(pred)
-    scores = scorer.score(target=target, prediction=prediction)
-    return {key: scores[key].fmeasure * 100 for key in score_keys}
+    scores = _ROUGE_SCORER.score(target=target, prediction=prediction)
+    return {key: scores[key].fmeasure * 100 for key in _ROUGE_SCORE_KEYS}
 
 
 # --- BERTScore --------------------------------------------------------------
 # Verbatim from data/curie/colabs/curie_run_eval.ipynb cell 20.
+#
+# BERTScorer singleton: the previous `bert_score.score(...)` call re-loaded
+# roberta-large (~1.4 GB) on every invocation — the orchestrator log showed
+# 11× "RobertaModel LOAD REPORT" in a single batch, ~128 s of pure load
+# overhead per training step. Holding the scorer resident eliminates that.
+# device='cpu' is explicit: the orchestrator process owns 0 GPUs under
+# prime-rl's deployment partitioning, so this stays off the saturated trainer
+# (GPU 1) and vLLM (GPU 0) cards. Math is identical to bert_score.score(...,
+# lang="en", rescale_with_baseline=False) — same defaults, same model.
 
+_BERT_SCORER: BERTScorer | None = None
+
+
+def _get_bert_scorer() -> BERTScorer:
+    global _BERT_SCORER
+    if _BERT_SCORER is None:
+        _BERT_SCORER = BERTScorer(
+            lang="en", rescale_with_baseline=False, device="cpu"
+        )
+    return _BERT_SCORER
+
+
+# Same dedupe as rouge_l: _bert_freeform_reward (headline) and _aux_bert_f1
+# (monitor) call this twice per rollout with identical args. Caching halves
+# the encoder forward passes per step. maxsize=128 covers ~32 rollouts/step
+# with headroom; entries are tiny (3 floats each).
+@lru_cache(maxsize=128)
 def bert_score_fn(pred: str, ref: str) -> dict[str, float]:
     """BERTScore precision/recall/F1 with lang='en'. Verbatim Curie cell 20."""
-    precision, recall, F1 = _bert_score_compute(
-        [pred], [ref], lang="en", verbose=False
-    )
+    precision, recall, F1 = _get_bert_scorer().score([pred], [ref])
     return {
         "bert_precision": precision.item(),
         "bert_recall": recall.item(),
