@@ -11,8 +11,8 @@ if [[ -z "${INFERENCE_SERVER_IP:-}" ]]; then
     echo "ERROR: INFERENCE_SERVER_IP env var required (local prime-rl inference server address)" >&2
     exit 1
 fi
-if [[ -z "${GEMINI_API_KEY:-}" ]]; then
-    echo "ERROR: GEMINI_API_KEY env var required (continual Phase 3 replays retrieval LLMSim tasks)" >&2
+if [[ -z "${GOOGLE_CLOUD_PROJECT:-}" ]]; then
+    echo "ERROR: GOOGLE_CLOUD_PROJECT env var required (continual Phase 3 replays retrieval LLMSim tasks via Vertex AI)" >&2
     exit 1
 fi
 if [[ -z "${CONTINUAL_PHASE2_CKPT:-}" ]]; then

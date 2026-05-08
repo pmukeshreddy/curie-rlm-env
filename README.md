@@ -16,7 +16,8 @@ Required env vars (local training):
 | `INFERENCE_SERVER_IP` | Address of the local prime-rl inference server | Stage 5 continual training |
 | `HF_TOKEN` | Hugging Face auth for `Qwen/Qwen3-8B` download | First-time model fetch |
 | `WANDB_API_KEY` | W&B logging | Stage 5 (if W&B enabled) |
-| `GEMINI_API_KEY` | LLMSim judge for retrieval rewards | Continual Phases 2 and 3 only |
+| `GOOGLE_CLOUD_PROJECT` | Vertex AI project id for the LLMSim judge | Continual Phases 2 and 3 only |
+| `GOOGLE_CLOUD_LOCATION` | Vertex AI region (default `us-central1`) | Continual Phases 2 and 3 (optional) |
 
 Optional local-routing knobs (all have defaults):
 

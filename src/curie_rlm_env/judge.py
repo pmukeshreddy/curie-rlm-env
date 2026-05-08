@@ -17,18 +17,27 @@ _JUDGE_CFG_PATH = Path(__file__).resolve().parent.parent.parent / "config" / "ju
 
 
 def make_gemini_judge_from_env() -> Callable[[str], str]:
-    """Build the locked Gemini judge callable from GEMINI_API_KEY."""
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if api_key is None or not api_key.strip():
+    """Build the locked Gemini judge callable using Vertex AI.
+
+    Required: GOOGLE_CLOUD_PROJECT (GCP project id).
+    Optional: GOOGLE_CLOUD_LOCATION (default: us-central1).
+    Auth: handled by the SDK via Application Default Credentials
+    (`gcloud auth application-default login`), GOOGLE_APPLICATION_CREDENTIALS
+    service-account JSON, or workload identity on GCP-hosted runtimes.
+    """
+    project = os.environ.get("GOOGLE_CLOUD_PROJECT")
+    if project is None or not project.strip():
         raise RuntimeError(
-            "GEMINI_API_KEY env var required for continual replay phases with retrieval LLMSim."
+            "GOOGLE_CLOUD_PROJECT env var required for the Vertex AI judge "
+            "used by continual replay phases with retrieval LLMSim."
         )
+    location = os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1")
 
     from google import genai
 
     cfg = yaml.safe_load(_JUDGE_CFG_PATH.read_text())
     judge_model_id = cfg["judge_model_id"]
-    client = genai.Client(api_key=api_key)
+    client = genai.Client(vertexai=True, project=project, location=location)
 
     def judge_call(prompt: str) -> str:
         response = client.models.generate_content(
