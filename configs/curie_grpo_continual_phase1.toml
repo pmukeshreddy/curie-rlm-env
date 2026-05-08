@@ -30,6 +30,14 @@ batch_size = 64
 rollouts_per_example = 16
 max_async_level = 2  # deeper rollout buffer (default 1); +~5 MB CPU RAM, 0 GPU
 
+[orchestrator.buffer]
+# DAPO Dynamic Sampling (arXiv 2503.14476 §3.2): drop prompt groups whose
+# average reward is exactly 0.0 or 1.0 — they contribute zero gradient.
+# zero_advantage filter (orchestrator.filters.2) is already on by default
+# and catches per-rollout cases; this catches the all-flat group case.
+# Rare on Phase 1 free-form (continuous ROUGE+BERT) but right for Phase 2/3.
+online_difficulty_filtering = true
+
 # Per Stage 5a §5 — verifiers/utils/env_utils.py maps id="curie-rlm-env"
 # (with hyphens) to module name "curie_rlm_env" (with underscores).
 [[orchestrator.train.env]]
