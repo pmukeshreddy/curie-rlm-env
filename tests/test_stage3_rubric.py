@@ -184,34 +184,70 @@ def test_bert_rescaling_is_engaged():
     Proves rescale_with_baseline=True is actually wired through bert_score_fn.
     Fixture is the same 'lorem ipsum xyz' vs HFE-perfect_match sentence pair
     already used by test_freeform_short_confident / test_hfe_garbage_input_low.
-    Empirically: raw F1 ~0.78, rescaled F1 ~-0.30 (clamped to 0.0), delta ~1.08.
+    Empirically: raw F1 ~0.78, rescaled F1 ~-0.30 (returned raw, not clamped),
+    delta ~1.08.
     """
     pred = "lorem ipsum xyz"
     ref = "Hartree-Fock extraction yields the Hamiltonian for the lattice model."
-    rescaled_clamped = bert_score_fn(pred, ref)["bert_f1"]
+    rescaled = bert_score_fn(pred, ref)["bert_f1"]
     # Parallel un-cached BERTScorer for the comparison (different instance, so
     # the module-level _BERT_SCORER singleton isn't disturbed).
     from bert_score import BERTScorer
     raw_scorer = BERTScorer(lang="en", rescale_with_baseline=False, device="cpu")
     _, _, raw_F1 = raw_scorer.score([pred], [ref])
     raw = raw_F1.item()
-    assert raw - rescaled_clamped > 0.1, (
-        f"rescaling not engaged: raw={raw}, rescaled+clamped={rescaled_clamped}"
+    assert raw - rescaled > 0.1, (
+        f"rescaling not engaged: raw={raw}, rescaled={rescaled}"
     )
 
 
-def test_bert_rescaled_clamps_negative_to_zero():
-    """Clamp: when raw rescaled BERTScore is below baseline (negative), bert_score_fn
-    returns exactly 0.0.
+def test_bert_score_fn_returns_negative_for_below_baseline():
+    """Diagnostic preservation: bert_score_fn must return the raw rescaled F1
+    (including the negative tail) so _aux_bert_f1 logs the full distribution.
 
-    Without the clamp, freeform_geometric would raise on the negative input (the
-    geometric mean's [0,1] domain). 'lorem ipsum xyz' vs scientific GT rescales to
-    ~-0.30; bert_score_fn clamps to 0.0.
+    Without this, every below-baseline rollout logs as 0.0 in Stage 5 W&B and
+    we lose the ability to distinguish 'crossing baseline by -0.05' from
+    'crashing through to -0.45' — the exact length-grift detection signal.
     """
     pred = "lorem ipsum xyz"
     ref = "Hartree-Fock extraction yields the Hamiltonian for the lattice model."
     bert_f1 = bert_score_fn(pred, ref)["bert_f1"]
-    assert bert_f1 == 0.0
+    assert bert_f1 < 0.0, (
+        f"bert_score_fn must return raw rescaled F1 (negative for below-baseline); got {bert_f1}"
+    )
+
+
+def test_freeform_geometric_clamps_bert_negative_to_zero(rubric_default):
+    """Clamp moved to consumption site (CurieRubric._freeform_geometric_reward):
+    when bert_score_fn returns a below-baseline (negative) value, the rubric
+    clamps it to 0 before passing to freeform_geometric, and the zero-guard
+    collapses the headline reward to 0.
+
+    Aux _aux_bert_f1 still sees the raw negative value (see
+    test_bert_score_fn_returns_negative_for_below_baseline) — only the
+    headline geometric path clamps.
+    """
+    pred = "lorem ipsum xyz"
+    ref = "Hartree-Fock extraction yields the Hamiltonian for the lattice model."
+    s = _make_state("HFE", pred, ref)
+    assert _aggregate(rubric_default, s) == 0.0
+
+
+def test_freeform_geometric_rouge_strict_no_slop():
+    """ROUGE input is validated STRICTLY; only BERT gets IEEE-754 slop.
+
+    rouge_score returns 0-100 exactly (pure-Python fmeasure), divided by 100
+    upstream — strict [0, 1] by construction. Slop on ROUGE would absorb real
+    upstream bugs (e.g., a forgotten /100). BERT keeps slop because its
+    cosine-similarity arithmetic overshoots 1.0 by ~1.2e-7 on identity matches.
+    """
+    # ROUGE strict: 1.0 + 5e-7 (within the old global slop) must now raise.
+    with pytest.raises(ValueError):
+        freeform_geometric(1.0 + 5e-7, 0.5)
+    # BERT slop: same overshoot on the BERT input is permitted.
+    result = freeform_geometric(0.5, 1.0 + 5e-7)
+    # And the value is snapped to [0,1] post-validation so output ≤ 1.0.
+    assert result <= 1.0
 
 
 # ===========================================================================
@@ -783,6 +819,38 @@ def test_llm_sim_raises_on_malformed_judge_output():
             judge_client=malformed_judge,
         )
     assert "malformed JSON" in str(exc_info.value)
+    clear_cache()
+
+
+def test_llm_sim_raises_on_empty_judge_list():
+    """scorers.llm_sim must raise when judge_client returns an empty JSON list.
+
+    Empty list is outside the judge prompt's contract (which yields either a
+    matched record or a non-list null signal). Silently coercing to `{}` would
+    score it as "no match" and lose the diagnostic — a real prompt-confusion
+    failure mode would be indistinguishable from a legitimate zero score.
+    """
+    from curie_rlm_env.judge_cache import clear_cache
+
+    prompt_path = _FROZEN_PROMPTS / "dft_structure.txt"
+    if not prompt_path.is_file():
+        pytest.skip("LLMSim prompt file not present in this checkout")
+
+    clear_cache()
+
+    def empty_list_judge(_prompt: str) -> str:
+        return "[]"
+
+    with pytest.raises(ValueError) as exc_info:
+        llm_sim(
+            json_pred=[{"empty_list_audit_unique_pred_key": "v1"}],
+            json_ref=[{"empty_list_audit_unique_ref_key": "v1"}],
+            prompt_path=str(prompt_path),
+            judge_client=empty_list_judge,
+        )
+    msg = str(exc_info.value)
+    assert "empty JSON list" in msg
+    assert "gt index 0" in msg
     clear_cache()
 
 

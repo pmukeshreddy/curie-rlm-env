@@ -25,28 +25,36 @@ import Levenshtein
 # reward, closing the length-grift pathway in the prior additive 0.5/0.5 split.
 FREEFORM_ROUGE_EXPONENT = 0.6
 
-# IEEE-754 boundary slop, not a defensive wrap: BERTScore's identity-match
-# F1 can come back as ~1 + 1.2e-7 (verified empirically against roberta-large)
+# IEEE-754 boundary slop for BERT input ONLY: BERTScore's identity-match F1
+# can come back as ~1 + 1.2e-7 (verified empirically against roberta-large)
 # because cosine-similarity tensor arithmetic doesn't quite hit 1.0 exactly.
-# Mathematical bound is still [0, 1]; we widen the *check* by this much so
-# float noise at the boundary doesn't crash perfect-match rollouts. The value
-# is passed through unchanged — no clipping, no normalization.
+# ROUGE-Lsum has no such slop — it's computed by rouge_score and divided by
+# 100.0, strict [0, 1] by construction. Applying slop there would absorb real
+# upstream bugs (e.g., a forgotten /100) silently.
 _FREEFORM_BOUND_SLOP = 1e-6
 
 
 def freeform_geometric(rouge_lsum_norm: float, bert_f1: float) -> float:
     """Geometric coupling of normalized ROUGE-Lsum and BERTScore F1.
 
-    Inputs must already lie in [0, 1]: the rubric divides ROUGE-Lsum by 100
-    before calling. Zero on either component returns 0.0 — that signal must
-    propagate intact, not be epsilon-smoothed. Inputs outside [0, 1] (beyond
-    IEEE-754 boundary slop) raise.
+    ROUGE is validated STRICTLY against [0, 1] (no slop — out-of-range
+    indicates an upstream bug, surface it). BERT is validated with IEEE-754
+    boundary slop on either side, then snapped to [0, 1] before the geometric
+    formula so the output is strictly bounded by 1.0. Inputs must already lie
+    in [0, 1] by contract; the rubric divides ROUGE-Lsum by 100 and clamps
+    negative rescaled BERT to 0 at the consumption site before calling here.
+    Zero on either (post-snap) component returns 0.0 — the zero signal must
+    propagate, not be epsilon-smoothed.
     """
-    lo = 0.0 - _FREEFORM_BOUND_SLOP
-    hi = 1.0 + _FREEFORM_BOUND_SLOP
-    for name, val in (("rouge_lsum_norm", rouge_lsum_norm), ("bert_f1", bert_f1)):
-        if not (lo <= val <= hi):
-            raise ValueError(f"freeform_geometric: {name}={val!r} not in [0, 1]")
+    if not (0.0 <= rouge_lsum_norm <= 1.0):
+        raise ValueError(
+            f"freeform_geometric: rouge_lsum_norm={rouge_lsum_norm!r} not in [0, 1] (strict)"
+        )
+    if not (0.0 - _FREEFORM_BOUND_SLOP <= bert_f1 <= 1.0 + _FREEFORM_BOUND_SLOP):
+        raise ValueError(
+            f"freeform_geometric: bert_f1={bert_f1!r} not in [0, 1] (±IEEE slop)"
+        )
+    bert_f1 = min(1.0, max(0.0, bert_f1))
     if rouge_lsum_norm == 0.0 or bert_f1 == 0.0:
         return 0.0
     alpha = FREEFORM_ROUGE_EXPONENT
@@ -119,20 +127,22 @@ def _get_bert_scorer() -> BERTScorer:
 def bert_score_fn(pred: str, ref: str) -> dict[str, float]:
     """BERTScore precision/recall/F1 with lang='en', rescale_with_baseline=True.
 
-    F1 is clamped to 0.0 at the scorer boundary: rescaled F1 goes negative when
-    the prediction scores below the random-pair baseline (empirically ~-0.30
-    for `'lorem ipsum xyz'` vs scientific GT, ~-0.48 for token-repetition
-    hacks). The downstream geometric-mean combiner needs inputs in [0, 1] —
-    propagating a negative would either raise via the range check or invert the
-    reward sign. Clamping to 0 lets the zero-guard collapse the reward, which
-    is the correct semantic: a below-baseline output gets no free-form credit.
-    Precision/recall are returned raw (debugging signal only, no consumer).
+    Returns the raw rescaled values. F1 is roughly in [-1, 1] under rescaling:
+    identity matches stay near 1.0, random English vs scientific text rescales
+    near 0, and below-baseline outputs go negative (empirically ~-0.30 for
+    `'lorem ipsum xyz'` vs scientific GT, ~-0.48 for token-repetition hacks).
+    Negative values are preserved here so the weight-0 aux observability path
+    (_aux_bert_f1) can log the full distribution including the negative tail —
+    Stage 5 W&B needs that signal to distinguish "rollouts crossing baseline by
+    -0.05" from "rollouts crashing through to -0.45".
+    Consumers that need inputs in [0, 1] (freeform_geometric) must clamp at the
+    consumption site, not here.
     """
     precision, recall, F1 = _get_bert_scorer().score([pred], [ref])
     return {
         "bert_precision": precision.item(),
         "bert_recall": recall.item(),
-        "bert_f1": max(0.0, F1.item()),
+        "bert_f1": F1.item(),
     }
 
 
@@ -251,7 +261,17 @@ def llm_sim(
                 f"(raw output excerpt, ≤200 chars): {safe_excerpt!r}"
             ) from exc
         if isinstance(output_json, list):
-            output_json = output_json[0] if output_json else {}
+            if not output_json:
+                # Strict: empty-list judge output is outside the judge prompt's
+                # contract (which yields a matched record or a non-list null).
+                # Conflating "empty list" with "no match" silently scores it as
+                # zero — surface it so a real prompt confusion is diagnosable.
+                safe_excerpt = (output[:200] if isinstance(output, str) else repr(output))[:200]
+                raise ValueError(
+                    f"LLMSim judge returned empty JSON list for gt index {j} "
+                    f"(raw output excerpt, ≤200 chars): {safe_excerpt!r}"
+                )
+            output_json = output_json[0]
         eval_list.append(output_json)
 
     # Verbatim Curie cell 18 (eval_overall_result) with NaN → 0.0 substitution.

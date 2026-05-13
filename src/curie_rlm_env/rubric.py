@@ -216,8 +216,14 @@ class CurieRubric(vf.Rubric):
         if not pred_text.strip():
             return 0.0
         rouge_norm = rouge_l(pred_text, answer)["rougeLsum"] / 100.0
-        bert_f1 = bert_score_fn(pred_text, answer)["bert_f1"]
-        return float(freeform_geometric(rouge_norm, bert_f1))
+        # bert_score_fn returns the raw rescaled F1 (can be negative for below-
+        # baseline outputs — the diagnostic signal _aux_bert_f1 needs to keep).
+        # Geometric mean's domain is [0, 1]; below-baseline = no free-form credit,
+        # so clamp to 0 here at the consumption site and let the zero-guard
+        # inside freeform_geometric collapse the reward.
+        bert_f1_raw = bert_score_fn(pred_text, answer)["bert_f1"]
+        bert_f1_for_geometric = max(0.0, bert_f1_raw)
+        return float(freeform_geometric(rouge_norm, bert_f1_for_geometric))
 
     # ------- Auxiliary observability metrics (weight 0, all tasks) ---------
 
@@ -228,6 +234,10 @@ class CurieRubric(vf.Rubric):
         return float(rouge_l(pred_text, answer)["rougeLsum"])
 
     async def _aux_bert_f1(self, prompt, completion, answer, state, task, info, **kwargs) -> float:
+        # Logs raw rescaled BERTScore F1 (can be negative for below-baseline
+        # outputs). This is the diagnostic signal Stage 5 W&B uses to track the
+        # length-grift distribution — do NOT clamp here; the headline reward's
+        # clamp is at the consumption site in _freeform_geometric_reward.
         pred_text = self._extract_pred(completion, state)
         if not pred_text.strip() or not answer:
             return 0.0
