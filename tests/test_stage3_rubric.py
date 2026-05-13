@@ -26,9 +26,9 @@ from curie_rlm_env import CurieRLMEnv, CurieRubric, load_environment
 from curie_rlm_env.scorers import (
     FREEFORM_ROUGE_EXPONENT,
     bert_score_fn,
+    diou,
     freeform_geometric,
     id_r,
-    iou,
     llm_sim,
     rouge_l,
 )
@@ -643,7 +643,7 @@ def test_reward_weights_match_yaml(rubric_default):
     cfg = yaml.safe_load((_CONFIG / "safeguards.yaml").read_text())["rubric"]
     weights = {f.__name__: w for f, w in zip(rubric_default.funcs, rubric_default.weights)}
     assert weights["_llmsim_reward"] == cfg["llm_sim_weight"]
-    assert weights["_iou_reward"] == cfg["deterministic_weight"]
+    assert weights["_diou_reward"] == cfg["deterministic_weight"]
     assert weights["_idr_reward"] == cfg["deterministic_weight"]
     # updated for geometric coupling (anti-length-grift):
     # _freeform_geometric_reward wired at deterministic_weight=1.0 (parity with IoU/ID_r);
@@ -701,13 +701,14 @@ def test_no_length_penalty_function():
 
 
 def test_zero_anti_hack_reward_functions(rubric_default):
-    # updated for geometric coupling (anti-length-grift): ROUGE+BERT free-form pair
-    # collapsed into a single _freeform_geometric_reward. Now 4 headline + 2 aux = 6.
+    # Stage 5 updates: _iou_reward renamed to _diou_reward (DIoU replaces IoU);
+    # _aux_diou_raw added as a weight-0 observability metric (raw DIoU including
+    # the negative no-overlap tail). Now 4 headline + 3 aux = 7 funcs.
     func_names = sorted(f.__name__ for f in rubric_default.funcs)
     expected = sorted([
-        "_llmsim_reward", "_iou_reward", "_idr_reward",
+        "_llmsim_reward", "_diou_reward", "_idr_reward",
         "_freeform_geometric_reward",
-        "_aux_rouge_lsum", "_aux_bert_f1",
+        "_aux_rouge_lsum", "_aux_bert_f1", "_aux_diou_raw",
     ])
     assert func_names == expected
 
@@ -745,20 +746,20 @@ def test_llmsim_reward_returns_zero_on_malformed_prediction(rubric_match):
     assert score == 0.0
 
 
-def test_iou_reward_raises_on_non_dict_reference(rubric_default):
+def test_diou_reward_raises_on_non_dict_reference(rubric_default):
     with pytest.raises(ValueError):
-        _call_reward(rubric_default, "_iou_reward", "BIOGR",
+        _call_reward(rubric_default, "_diou_reward", "BIOGR",
                      completion='{"W":0,"S":0,"E":1,"N":1}', answer='[1,2,3,4]')
 
 
-def test_iou_reward_raises_on_missing_reference_keys(rubric_default):
+def test_diou_reward_raises_on_missing_reference_keys(rubric_default):
     with pytest.raises(ValueError):
-        _call_reward(rubric_default, "_iou_reward", "BIOGR",
+        _call_reward(rubric_default, "_diou_reward", "BIOGR",
                      completion='{"W":0,"S":0,"E":1,"N":1}', answer='{"W":0,"S":0,"E":1}')
 
 
-def test_iou_reward_returns_zero_on_malformed_prediction(rubric_default):
-    score = _call_reward(rubric_default, "_iou_reward", "BIOGR",
+def test_diou_reward_returns_zero_on_malformed_prediction(rubric_default):
+    score = _call_reward(rubric_default, "_diou_reward", "BIOGR",
                          completion="not json", answer='{"W":0,"S":0,"E":1,"N":1}')
     assert score == 0.0
 
@@ -969,6 +970,180 @@ def test_llm_sim_verifier_keeps_match_on_numeric_agreement():
     assert result["verifier_revoked_count"] == 0
     assert result["f1"] == 1.0
     clear_cache()
+
+
+# ===========================================================================
+# FIX 1 — PDB id_r length-floor + length-normalized identity (Stage 5 hack guard)
+# ===========================================================================
+
+_REF_48 = "MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQDNL"  # 48 residues
+
+
+def test_id_r_short_pred_rejected_by_length_floor():
+    """Hack regression guard: pred='M' (universal start codon, len 1) against
+    a 48-residue ref must score 0.0 with length_floor_rejected=True. The
+    absolute 30-residue floor rejects sub-domain stubs before alignment."""
+    result = id_r("M", _REF_48)
+    assert result["identity_ratio"] == 0.0
+    assert result["length_floor_rejected"] is True
+    assert result["len_pred"] == 1
+    assert result["len_ref"] == 48
+
+
+def test_id_r_padded_pred_low_score():
+    """Padding hack: pred = ref + 100 trailing residues → matched=48,
+    denom=148, ratio=48/148 ≈ 0.3243. The max(len_pred, len_ref) denominator
+    bounds the score even when the prediction smuggles in the full reference."""
+    pred = _REF_48 + "A" * 100
+    result = id_r(pred, _REF_48)
+    assert result["length_floor_rejected"] is False
+    assert result["matched"] == 48
+    assert result["len_pred"] == 148
+    assert result["len_ref"] == 48
+    assert result["identity_ratio"] == pytest.approx(48 / 148, abs=1e-6)
+
+
+def test_id_r_exact_match_full_score():
+    """pred==ref (len>=30) → identity_ratio=1.0."""
+    result = id_r(_REF_48, _REF_48)
+    assert result["identity_ratio"] == 1.0
+    assert result["matched"] == 48
+    assert result["length_floor_rejected"] is False
+
+
+def test_id_r_blosum_no_substitution_credit():
+    """Strict-identity scoring lock: conservative substitution (L↔I) does NOT
+    get BLOSUM-style partial credit. ref has L wherever pred has I; matched
+    drops to 0 for those positions even though biologically these are similar."""
+    ref =  "AAAAAAAAAA" + "LLLLLLLLLL" + "AAAAAAAAAA" + "AAAAAAAAAA"  # 40 chars
+    pred = "AAAAAAAAAA" + "IIIIIIIIII" + "AAAAAAAAAA" + "AAAAAAAAAA"  # 40 chars, L→I
+    result = id_r(pred, ref)
+    assert result["length_floor_rejected"] is False
+    # 30 of 40 positions match exactly (the A's); the 10 L vs I positions
+    # are mismatches under strict identity (not credited under BLOSUM).
+    assert result["matched"] == 30
+    assert result["identity_ratio"] == pytest.approx(30 / 40, abs=1e-6)
+
+
+def test_id_r_below_30_residue_floor():
+    """ref=40 chars, pred=15 chars: 0.3*40=12, max(30, 12)=30, pred=15<30 →
+    rejected by the absolute 30-residue floor."""
+    ref = "A" * 40
+    pred = "A" * 15
+    result = id_r(pred, ref)
+    assert result["identity_ratio"] == 0.0
+    assert result["length_floor_rejected"] is True
+
+
+def test_id_r_above_fraction_floor_below_absolute_floor():
+    """ref=20 chars, pred=10 chars: 0.3*20=6, max(30, 6)=30, pred=10<30 →
+    rejected by absolute floor even though pred is above the 0.3 fraction.
+    Documents the floor-stacking semantics: floor = max(absolute, fraction)."""
+    ref = "A" * 20
+    pred = "A" * 10
+    result = id_r(pred, ref)
+    assert result["identity_ratio"] == 0.0
+    assert result["length_floor_rejected"] is True
+
+
+# ===========================================================================
+# FIX 2 — BIOGR Distance-IoU + antimeridian + rubric-clamp (Stage 5)
+# ===========================================================================
+
+def test_diou_perfect_overlap():
+    assert diou([0, 0, 1, 1], [0, 0, 1, 1]) == pytest.approx(1.0, abs=1e-9)
+
+
+def test_diou_no_overlap_close_negative_gradient():
+    """Plain IoU returns 0.0 for any non-overlap (sparse-gradient cliff).
+    DIoU returns a NEGATIVE value proportional to center distance — the
+    gradient is present. Hand-computed: rho²=1.21, c²=5.41, DIoU=-0.2237.
+
+    The 'cliff is gone' claim is: DIoU is distinct from 0 AND has a
+    non-trivial magnitude. Sign is negative per Zheng et al. 2020.
+    """
+    score = diou([0, 0, 1, 1], [1.1, 0, 2.1, 1])
+    assert score == pytest.approx(-1.21 / 5.41, abs=1e-4)
+    # Plain IoU would return 0.0 here — the gradient was absent before DIoU.
+    assert score < 0.0
+    assert abs(score) > 0.1  # distinct from 0 by a non-trivial margin
+
+
+def test_diou_no_overlap_far_approaches_neg_one():
+    """Far-apart bboxes get DIoU near -1 — the floor of the metric."""
+    score = diou([0, 0, 1, 1], [178, 0, 179, 1])
+    assert score < -0.9
+
+
+def test_diou_antimeridian_crossing_identical():
+    """Identical antimeridian-crossing bboxes → 1.0 (sub-bbox split + shifted
+    centers must collapse to perfect overlap)."""
+    box = [170, 30, -170, 40]
+    assert diou(box, box) == pytest.approx(1.0, abs=1e-9)
+
+
+def test_diou_rejects_flipped_lat():
+    """S > N is a reference-data bug; raise immediately, no silent zero."""
+    with pytest.raises(ValueError):
+        diou([0, 50, 1, 30], [0, 0, 1, 1])
+
+
+def test_diou_rejects_zero_area_width():
+    """W == E (zero width) is a degenerate bbox; raise."""
+    with pytest.raises(ValueError):
+        diou([5, 0, 5, 1], [0, 0, 1, 1])
+
+
+def test_diou_rubric_clamps_negative(rubric_default):
+    """Headline reward must be in [0, 1]: rubric layer clamps DIoU's negative
+    tail to 0. Aux _aux_diou_raw keeps the raw value (tested separately when
+    real BIOGR data is present)."""
+    import asyncio
+    far_pred = json.dumps({"W": 178, "S": 0, "E": 179, "N": 1})
+    far_ref = json.dumps({"W": 0, "S": 0, "E": 1, "N": 1})
+    s = _make_state("BIOGR", far_pred, far_ref)
+    score = asyncio.run(rubric_default._diou_reward(
+        prompt=s["prompt"], completion=far_pred, answer=far_ref,
+        state=s, task="BIOGR", info=s["info"],
+    ))
+    assert score == 0.0  # clamped from a deeply negative DIoU
+
+
+# ===========================================================================
+# FIX 4 — ROUGE-L stopword filtering (Stage 5 content-free baseline guard)
+# ===========================================================================
+
+def test_rouge_stopword_baseline_dropped():
+    """Floor regression guard: stopword-only string vs scientific GT must
+    score < 5/100. Pre-filter empirical baseline was ~13/100."""
+    ref = "Hartree-Fock extraction yields the Hamiltonian for the lattice model and computes the band structure of the material."
+    stopwords_only = "the of and in to a is for that on with by"
+    score = rouge_l(stopwords_only, ref)["rougeLsum"]
+    assert score < 5.0, f"stopword-only baseline still {score}"
+
+
+def test_rouge_content_words_preserved():
+    """Filtering must not damage legitimate scoring. Content-rich pred against
+    GT should still score high (not lose significant signal to stopword removal)."""
+    ref = "Hartree-Fock extraction yields the Hamiltonian for the lattice model"
+    content_pred = "Hartree-Fock extraction yields Hamiltonian lattice model"
+    score = rouge_l(content_pred, ref)["rougeLsum"]
+    assert score > 70.0, f"content match score too low: {score}"
+
+
+def test_rouge_lsum_range_invariant():
+    """Range contract: ROUGE-Lsum stays in [0, 100] under stopword filtering.
+    Iterate a few canonical fixtures to confirm."""
+    ref = "Hartree-Fock extraction yields the Hamiltonian for the lattice model."
+    pairs = [
+        (ref, ref),
+        ("totally unrelated content about geology", ref),
+        ("", ref),
+        ("the the the the the", ref),
+    ]
+    for pred, r in pairs:
+        score = rouge_l(pred, r)["rougeLsum"]
+        assert 0.0 <= score <= 100.0, f"out-of-range: pred={pred!r} -> {score}"
 
 
 def test_scorers_llm_sim_does_not_have_repair_branch():

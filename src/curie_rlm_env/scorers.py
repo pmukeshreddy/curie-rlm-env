@@ -72,7 +72,63 @@ def _prepare_summary_rouge(summary: str) -> str:
 
 
 _ROUGE_SCORE_KEYS = ("rouge1", "rouge2", "rougeLsum")
-_ROUGE_SCORER = rouge_scorer.RougeScorer(list(_ROUGE_SCORE_KEYS))
+
+# Stage 5 Documented Deviation from Curie cell 22: ROUGE-L is computed with
+# stopword filtering. rouge_score's DefaultTokenizer has no `stopwords` param,
+# so we plug in a custom tokenizer that wraps the library's tokenize.tokenize
+# call and drops common English function words AFTER stemming. Triggered by
+# the empirical content-free baseline (stopword-only string scored ~13/100 on
+# scientific GT) interacting with the geometric coupling — independent reward
+# even when the model produces nothing of substance. Filtering drops the floor
+# to <5/100. List = NLTK english stopwords embedded inline (no nltk dep).
+from rouge_score import tokenize as _rouge_tokenize
+
+_ROUGE_STOPWORDS: frozenset[str] = frozenset({
+    "i", "me", "my", "myself", "we", "our", "ours", "ourselves", "you", "your",
+    "yours", "yourself", "yourselves", "he", "him", "his", "himself", "she",
+    "her", "hers", "herself", "it", "its", "itself", "they", "them", "their",
+    "theirs", "themselves", "what", "which", "who", "whom", "this", "that",
+    "these", "those", "am", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "having", "do", "does", "did", "doing", "a", "an",
+    "the", "and", "but", "if", "or", "because", "as", "until", "while", "of",
+    "at", "by", "for", "with", "about", "against", "between", "into", "through",
+    "during", "before", "after", "above", "below", "to", "from", "up", "down",
+    "in", "out", "on", "off", "over", "under", "again", "further", "then",
+    "once", "here", "there", "when", "where", "why", "how", "all", "any",
+    "both", "each", "few", "more", "most", "other", "some", "such", "no",
+    "nor", "not", "only", "own", "same", "so", "than", "too", "very", "s",
+    "t", "can", "will", "just", "don", "should", "now",
+})
+
+
+class _RougeStopwordTokenizer:
+    """rouge_score Tokenizer interface implementation that drops English
+    stopwords AFTER the library's stemming step (stemming runs only on tokens
+    >3 chars, so short function words like 'the'/'of' aren't transformed).
+
+    Stopword list intentionally generic — NO scientific-domain extensions.
+    Removing 'experiment', 'study', 'method', 'result' would penalize
+    legitimate scientific writing.
+    """
+
+    def __init__(self, stemmer):
+        self._stemmer = stemmer
+        self._stopwords = _ROUGE_STOPWORDS
+
+    def tokenize(self, text):
+        tokens = _rouge_tokenize.tokenize(text, self._stemmer)
+        return [t for t in tokens if t not in self._stopwords]
+
+
+# rouge_score's DefaultTokenizer uses NLTK's PorterStemmer when
+# use_stemmer=True. We construct the same stemmer once and share it with the
+# custom tokenizer (matches the library's default pattern).
+from nltk.stem.porter import PorterStemmer  # noqa: E402
+
+_ROUGE_TOKENIZER = _RougeStopwordTokenizer(PorterStemmer())
+_ROUGE_SCORER = rouge_scorer.RougeScorer(
+    list(_ROUGE_SCORE_KEYS), tokenizer=_ROUGE_TOKENIZER,
+)
 
 
 # lru_cache dedupes the rubric's twin call sites — _freeform_geometric_reward
@@ -147,72 +203,189 @@ def bert_score_fn(pred: str, ref: str) -> dict[str, float]:
     }
 
 
-# --- IoU --------------------------------------------------------------------
-# Verbatim from data/curie/colabs/curie_run_eval.ipynb cell 24
-# (bb_intersection_over_union). Box layout: [W, S, E, N].
+# --- DIoU (BIOGR) -----------------------------------------------------------
+# Stage 5 Documented Deviation from Curie cell 24:
+#   1. Plain IoU replaced with Distance-IoU (Zheng et al. 2020):
+#        DIoU = IoU - ρ²(centers) / c²(enclosing diagonal)
+#      DIoU is in [-1, 1]; non-overlapping bboxes get a NEGATIVE gradient
+#      signal proportional to center distance — fixes the IoU sparse-gradient
+#      cliff (plain IoU returns exactly 0 for any non-overlap regardless of
+#      how close, giving RL nothing to climb).
+#   2. Antimeridian handling: a bbox with W > E (e.g. W=170, E=-170) is split
+#      into [W, 180] and [-180, E] before intersection/union; centers are
+#      computed in a "shifted" coord system so the bbox is contiguous.
+#   3. Reward clamp NOT here — clamped at rubric.py consumption site
+#      (same pattern as bert_score_fn / rescaled BERT). Raw negative output
+#      stays available for the _aux_diou_raw observability metric.
+#
+# Validation is strict — S>=N, |lat|>90, zero-area bboxes raise. These are
+# reference-data or prediction-format bugs, not silent failures.
 
-def iou(box_a, box_b) -> float:
-    """IoU between two axis-aligned boxes. Verbatim Curie cell 24.
+def _split_at_antimeridian(box) -> list[tuple[float, float, float, float]]:
+    """[W, S, E, N] → 1 or 2 non-crossing sub-bboxes. W==E (zero width) caller-validated."""
+    W, S, E, N = float(box[0]), float(box[1]), float(box[2]), float(box[3])
+    if W <= E:
+        return [(W, S, E, N)]
+    return [(W, S, 180.0, N), (-180.0, S, E, N)]
 
-    Box layout per Curie cell 24 coords_to_box: [W, S, E, N].
-    """
-    box_a = np.asarray(box_a, dtype=float)
-    box_b = np.asarray(box_b, dtype=float)
 
-    def _intersection_area(box_a, box_b):
-        x_a = max(box_a[0], box_b[0])
-        y_a = max(box_a[1], box_b[1])
-        x_b = min(box_a[2], box_b[2])
-        y_b = min(box_a[3], box_b[3])
-        width = x_b - x_a
-        height = y_b - y_a
-        if (width < 0) or (height < 0):
-            return 0.0
-        return width * height
+def _bbox_area(box) -> float:
+    return (box[2] - box[0]) * (box[3] - box[1])
 
-    def _area(box):
-        return (box[2] - box[0]) * (box[3] - box[1])
 
-    inter_area = _intersection_area(box_a, box_b)
-    union_area = _area(box_a) + _area(box_b) - inter_area
-    if union_area == 0:
+def _pair_intersection_area(box_a, box_b) -> float:
+    W = max(box_a[0], box_b[0])
+    S = max(box_a[1], box_b[1])
+    E = min(box_a[2], box_b[2])
+    N = min(box_a[3], box_b[3])
+    if E <= W or N <= S:
         return 0.0
-    return inter_area / float(union_area)
+    return (E - W) * (N - S)
+
+
+def _shifted_center(box) -> tuple[float, float]:
+    """Center longitude in the bbox's natural (possibly wrapping) frame.
+
+    For a non-crossing bbox, midpoint of [W, E]. For a crossing bbox (W > E),
+    treat the eastward span as [W, E + 360] and take that midpoint. Returned
+    longitude may lie outside [-180, 180]; the diou() caller wraps differences
+    to handle the shorter great-circle separation.
+    """
+    W, S, E, N = float(box[0]), float(box[1]), float(box[2]), float(box[3])
+    if W <= E:
+        cx = (W + E) / 2.0
+    else:
+        cx = (W + E + 360.0) / 2.0
+    cy = (S + N) / 2.0
+    return cx, cy
+
+
+def _validate_bbox(box, name: str) -> None:
+    W, S, E, N = float(box[0]), float(box[1]), float(box[2]), float(box[3])
+    if S >= N:
+        raise ValueError(f"{name}: S>=N (latitude not strictly increasing): S={S}, N={N}")
+    if W == E:
+        raise ValueError(f"{name}: zero-width bbox (W==E={W})")
+    if S == N:
+        raise ValueError(f"{name}: zero-height bbox (S==N={S})")
+    if S < -90.0 or N > 90.0:
+        raise ValueError(f"{name}: latitude out of [-90, 90]: S={S}, N={N}")
+
+
+def diou(box_a, box_b) -> float:
+    """Distance-IoU on (W, S, E, N) lat/lon bboxes, antimeridian-aware.
+
+    Returns the raw DIoU in [-1, 1]. Non-overlapping bboxes return NEGATIVE
+    values proportional to center distance — that's the desired gradient.
+    The rubric layer clamps to [0, 1] for the reward; the aux observability
+    metric (_aux_diou_raw) keeps the raw value for Stage 5 W&B.
+    """
+    _validate_bbox(box_a, "box_a")
+    _validate_bbox(box_b, "box_b")
+
+    a_subs = _split_at_antimeridian(box_a)
+    b_subs = _split_at_antimeridian(box_b)
+
+    inter = sum(_pair_intersection_area(a, b) for a in a_subs for b in b_subs)
+    area_a = sum(_bbox_area(s) for s in a_subs)
+    area_b = sum(_bbox_area(s) for s in b_subs)
+    union = area_a + area_b - inter
+    iou_score = inter / union if union > 0 else 0.0
+
+    cx_a, cy_a = _shifted_center(box_a)
+    cx_b, cy_b = _shifted_center(box_b)
+    dx = cx_a - cx_b
+    # Wrap to the shorter direction around the sphere.
+    if dx > 180.0:
+        dx -= 360.0
+    elif dx < -180.0:
+        dx += 360.0
+    rho_sq = dx * dx + (cy_a - cy_b) ** 2
+
+    # Enclosing-bbox diagonal: pick the union of all sub-bbox extents in
+    # standard 2D space. For antimeridian-crossing bboxes this overstates the
+    # diagonal slightly (no spherical correction); acceptable given the
+    # ρ²/c² ratio is bounded and the metric stays in [-1, 1] in practice.
+    all_subs = a_subs + b_subs
+    enc_W = min(s[0] for s in all_subs)
+    enc_S = min(s[1] for s in all_subs)
+    enc_E = max(s[2] for s in all_subs)
+    enc_N = max(s[3] for s in all_subs)
+    c_sq = (enc_E - enc_W) ** 2 + (enc_N - enc_S) ** 2
+    if c_sq == 0:
+        return iou_score
+    return iou_score - rho_sq / c_sq
 
 
 # --- ID_r (PDB) -------------------------------------------------------------
-# Verbatim from data/curie/colabs/curie_run_eval.ipynb cell 26
-# (best_sequence_alignment_counts). Note: Curie's pdb_execute_code_eval branch
-# is dropped per Stage 3b sandbox-safety decision; sequence extraction
+# Adapted from data/curie/colabs/curie_run_eval.ipynb cell 26
+# (best_sequence_alignment_counts). Curie's pdb_execute_code_eval branch is
+# dropped per Stage 3b sandbox-safety decision; sequence extraction
 # (FASTA `>` path) lives in rubric.py, not here.
+#
+# Stage 5 Documented Deviation from cell 26:
+#   1. Length floor (30 absolute, 0.3 fraction of ref) — rejects sub-domain
+#      stubs ("M" universal start codon, etc.) before alignment.
+#   2. Explicit denom max(len_pred, len_ref) — removes the alignment-length-
+#      with-internal-gaps variation; aligns with the "did the model
+#      reproduce the full sequence" question.
+#   3. Strict-identity scoring (match=1, mismatch=0, gap=-1) — these are
+#      Biopython PairwiseAligner() defaults but we set them explicitly so a
+#      future Biopython version change can't silently shift to BLOSUM credit.
+#      Note: BLOSUM is the biologically-correct similarity metric, but for
+#      RL reward we want a sharp residue-exact match signal, not gradient
+#      credit for conservative substitutions (L↔I, V↔I, etc.).
+
+_PDB_LENGTH_FLOOR_ABS = 30  # smallest plausible functional protein domain
+_PDB_LENGTH_FLOOR_FRAC = 0.3  # 30% of ref length
+
 
 def id_r(pred_seq: str, gt_seq: str) -> dict[str, Any]:
-    """Pairwise alignment ID_r + counts. Verbatim Curie cell 26."""
-    sequence_1 = pred_seq if pred_seq else " "
-    sequence_2 = gt_seq if gt_seq else " "
-    aligner = Align.PairwiseAligner()
-    best_alignment = aligner.align(sequence_1, sequence_2)[0]
+    """Length-normalized identity ratio with hard length floor.
 
-    max_length = max(len(sequence_1), len(sequence_2))
-    if max_length == 0:
-        normalized_distance: Any = "Zero length sequences"
-    else:
-        normalized_distance = (
-            Levenshtein.distance(sequence_1, sequence_2) / max_length
-        )
-    if not best_alignment[0]:
-        identity_ratio: Any = "Zero length alignment"
-    else:
-        identity_ratio = (
-            best_alignment.counts().identities / len(best_alignment[0])
-        )
+    Returns:
+        identity_ratio: matched / max(len_pred, len_ref); 0.0 if floor rejects.
+        matched: raw exact-identity count from global alignment.
+        len_pred, len_ref: sequence lengths (diagnostics).
+        length_floor_rejected: bool, True iff floor triggered (Stage 5 W&B).
+        n_gaps, n_mismatches: Curie cell 26 counts (preserved for compat).
+    """
+    len_pred = len(pred_seq) if pred_seq else 0
+    len_ref = len(gt_seq) if gt_seq else 0
+
+    floor = max(_PDB_LENGTH_FLOOR_ABS, int(_PDB_LENGTH_FLOOR_FRAC * len_ref))
+    if len_pred < floor:
+        return {
+            "identity_ratio": 0.0,
+            "matched": 0,
+            "len_pred": len_pred,
+            "len_ref": len_ref,
+            "length_floor_rejected": True,
+            "n_gaps": 0,
+            "n_mismatches": 0,
+        }
+
+    aligner = Align.PairwiseAligner()
+    aligner.mode = "global"
+    aligner.match_score = 1
+    aligner.mismatch_score = 0
+    aligner.open_gap_score = -1
+    aligner.extend_gap_score = -1
+    best_alignment = aligner.align(pred_seq, gt_seq)[0]
+    counts = best_alignment.counts()
+    matched = counts.identities
+
+    denom = max(len_pred, len_ref)
+    identity_ratio = matched / denom if denom > 0 else 0.0
 
     return {
-        "n_gaps": best_alignment.counts().gaps,
-        "n_identities": best_alignment.counts().identities,
-        "n_mismatches": best_alignment.counts().mismatches,
-        "normalized_levenshtein_distance": normalized_distance,
         "identity_ratio": identity_ratio,
+        "matched": matched,
+        "len_pred": len_pred,
+        "len_ref": len_ref,
+        "length_floor_rejected": False,
+        "n_gaps": counts.gaps,
+        "n_mismatches": counts.mismatches,
     }
 
 

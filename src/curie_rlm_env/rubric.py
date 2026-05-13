@@ -28,7 +28,7 @@ from typing import Any, Callable, Optional
 import json5
 import verifiers as vf
 
-from .scorers import bert_score_fn, freeform_geometric, id_r, iou, llm_sim, rouge_l
+from .scorers import bert_score_fn, diou, freeform_geometric, id_r, llm_sim, rouge_l
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -61,12 +61,13 @@ class CurieRubric(vf.Rubric):
         self._judge_client = judge_client
         # Per-task headline reward funcs.
         self.add_reward_func(self._llmsim_reward, weight=0.7)
-        self.add_reward_func(self._iou_reward, weight=1.0)
+        self.add_reward_func(self._diou_reward, weight=1.0)
         self.add_reward_func(self._idr_reward, weight=1.0)
         self.add_reward_func(self._freeform_geometric_reward, weight=1.0)
         # Auxiliary observability metrics (weight 0 — applied to all tasks).
         self.add_metric(self._aux_rouge_lsum)
         self.add_metric(self._aux_bert_f1)
+        self.add_metric(self._aux_diou_raw)
 
     @staticmethod
     def _extract_pred(completion, state) -> str:
@@ -137,7 +138,7 @@ class CurieRubric(vf.Rubric):
         result = llm_sim(json_pred, json_ref, prompt_path, self._judge_client)
         return float(result["f1"])
 
-    async def _iou_reward(self, prompt, completion, answer, state, task, info, **kwargs) -> float:
+    async def _diou_reward(self, prompt, completion, answer, state, task, info, **kwargs) -> float:
         task_id = self._task_id(info, task)
         if task_id not in _GEOMETRIC_TASKS:
             return 0.0
@@ -159,13 +160,19 @@ class CurieRubric(vf.Rubric):
         if not isinstance(pred_box, dict):
             return 0.0
         try:
-            return float(iou(
+            raw_diou = diou(
                 [pred_box["W"], pred_box["S"], pred_box["E"], pred_box["N"]],
                 [ref_box["W"], ref_box["S"], ref_box["E"], ref_box["N"]],
-            ))
-        except (KeyError, TypeError):
-            # Pred missing one of W/S/E/N or non-numeric → invalid prediction → 0.
+            )
+        except (KeyError, TypeError, ValueError):
+            # Pred missing one of W/S/E/N, non-numeric, or fails diou's strict
+            # bbox validation (S>=N, |lat|>90, zero-area) → invalid prediction → 0.
             return 0.0
+        # DIoU is in [-1, 1] — negative values are the diagnostic "gradient
+        # without overlap" signal that _aux_diou_raw logs. The reward must
+        # stay in [0, 1]; clamp at the consumption site, same pattern as the
+        # rescaled-BERT clamp in _freeform_geometric_reward.
+        return max(0.0, float(raw_diou))
 
     async def _idr_reward(self, prompt, completion, answer, state, task, info, **kwargs) -> float:
         task_id = self._task_id(info, task)
@@ -198,11 +205,12 @@ class CurieRubric(vf.Rubric):
                 break
         if not pred_seq:
             pred_seq = pred_text.strip()
+        # id_r returns identity_ratio as float in [0, 1] under the Stage 5
+        # length-floor + length-normalized rewrite. The old string-typed
+        # "Zero length alignment" branch is removed — length_floor_rejected
+        # now carries the same signal explicitly.
         result = id_r(pred_seq, ref_seq)
-        score = result["identity_ratio"]
-        if isinstance(score, str):  # "Zero length alignment" / "Zero length sequences" → invalid pred
-            return 0.0
-        return float(score)
+        return float(result["identity_ratio"])
 
     async def _freeform_geometric_reward(self, prompt, completion, answer, state, task, info, **kwargs) -> float:
         task_id = self._task_id(info, task)
@@ -242,3 +250,33 @@ class CurieRubric(vf.Rubric):
         if not pred_text.strip() or not answer:
             return 0.0
         return float(bert_score_fn(pred_text, answer)["bert_f1"])
+
+    async def _aux_diou_raw(self, prompt, completion, answer, state, task, info, **kwargs) -> float:
+        # Logs raw DIoU (can be negative for non-overlapping bboxes). The
+        # headline _diou_reward clamps to [0, 1]; this aux keeps the negative
+        # tail for Stage 5 W&B — distance signal stays visible even when the
+        # clamp zeroes the reward. BIOGR only; non-bbox tasks return 0.0.
+        task_id = self._task_id(info, task)
+        if task_id not in _GEOMETRIC_TASKS:
+            return 0.0
+        if not isinstance(answer, str) or not answer:
+            return 0.0
+        try:
+            ref_box = json5.loads(answer)
+        except (ValueError, TypeError):
+            return 0.0
+        if not isinstance(ref_box, dict) or not all(k in ref_box for k in ("W", "S", "E", "N")):
+            return 0.0
+        pred_text = self._extract_pred(completion, state)
+        if not pred_text.strip():
+            return 0.0
+        pred_box = self._safe_loads_pred(pred_text)
+        if not isinstance(pred_box, dict):
+            return 0.0
+        try:
+            return float(diou(
+                [pred_box["W"], pred_box["S"], pred_box["E"], pred_box["N"]],
+                [ref_box["W"], ref_box["S"], ref_box["E"], ref_box["N"]],
+            ))
+        except (KeyError, TypeError, ValueError):
+            return 0.0

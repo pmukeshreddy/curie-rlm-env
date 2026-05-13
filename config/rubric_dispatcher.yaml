@@ -32,8 +32,8 @@ retrieval_tasks:
 
 geometric_tasks:
   ids: ["BIOGR"]
-  metric: "iou"                                # Intersection-over-Union (programmatic)
-  weight: 1.0                                  # deterministic_weight from safeguards.yaml
+  metric: "diou"                               # Distance-IoU (Zheng et al. 2020); antimeridian-aware. See Documented Deviations.
+  weight: 1.0                                  # deterministic_weight from safeguards.yaml; raw DIoU clamped to [0,1] at rubric layer
 
 structural_tasks:
   ids: ["PDB"]
