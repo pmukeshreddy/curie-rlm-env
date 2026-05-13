@@ -23,7 +23,15 @@ import yaml
 from verifiers.envs.experimental.rlm_env import RLMEnv, RLMMonitorRubric
 
 from curie_rlm_env import CurieRLMEnv, CurieRubric, load_environment
-from curie_rlm_env.scorers import bert_score_fn, id_r, iou, llm_sim, rouge_l
+from curie_rlm_env.scorers import (
+    FREEFORM_ROUGE_EXPONENT,
+    bert_score_fn,
+    freeform_geometric,
+    id_r,
+    iou,
+    llm_sim,
+    rouge_l,
+)
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -107,6 +115,106 @@ def _pdb_fasta(seq: str) -> str:
 
 
 # ===========================================================================
+# Guard #7 — Free-form geometric coupling (anti-length-grift)
+# Direct unit tests on scorers.freeform_geometric (no rubric, no fixtures).
+# ===========================================================================
+
+def test_freeform_geometric_alpha_is_zero_six():
+    # Lock the exponent — the asymmetric weight toward ROUGE-L is the whole point.
+    assert FREEFORM_ROUGE_EXPONENT == 0.6
+
+
+def test_freeform_geometric_perfect():
+    assert freeform_geometric(1.0, 1.0) == 1.0
+
+
+def test_freeform_geometric_zero_on_rouge_zero():
+    # Zero on either component must propagate; no epsilon, no floor.
+    assert freeform_geometric(0.0, 1.0) == 0.0
+
+
+def test_freeform_geometric_zero_on_bert_zero():
+    assert freeform_geometric(1.0, 0.0) == 0.0
+
+
+def test_freeform_geometric_both_half():
+    # 0.5^0.6 * 0.5^0.4 = 0.5^1.0 = 0.5 exactly.
+    assert freeform_geometric(0.5, 0.5) == pytest.approx(0.5, abs=1e-12)
+
+
+def test_freeform_geometric_asymmetric_length_grift_regression():
+    """Regression guard: geometric coupling penalizes length-grift harder than 0.5+0.5 additive.
+
+    (r=0.1, b=0.8) is the canonical length-grift pattern: low lexical overlap
+    (ROUGE), high semantic similarity (BERT) from padded filler. Old additive
+    rewarded this at 0.45; new geometric returns ~0.230 — the incentive is gone.
+    """
+    r, b = 0.1, 0.8
+    additive_old = 0.5 * r + 0.5 * b  # 0.45
+    geometric_new = freeform_geometric(r, b)
+    assert geometric_new == pytest.approx(0.22974, abs=1e-4)
+    assert geometric_new < additive_old
+
+
+def test_freeform_geometric_raises_above_one():
+    with pytest.raises(ValueError):
+        freeform_geometric(1.5, 0.5)
+
+
+def test_freeform_geometric_raises_below_zero():
+    with pytest.raises(ValueError):
+        freeform_geometric(-0.1, 0.5)
+
+
+def test_freeform_geometric_bounded_by_weighted_arithmetic_mean():
+    """Young's inequality / weighted AM-GM: r^0.6 * b^0.4 <= 0.6*r + 0.4*b ∀ (r,b) in [0,1]^2."""
+    grid = [0.0, 0.01, 0.1, 0.25, 0.5, 0.75, 0.9, 0.99, 1.0]
+    for r in grid:
+        for b in grid:
+            geo = freeform_geometric(r, b)
+            am = 0.6 * r + 0.4 * b
+            assert geo <= am + 1e-9, (
+                f"freeform_geometric({r}, {b}) = {geo} > weighted AM {am}"
+            )
+
+
+def test_bert_rescaling_is_engaged():
+    """Sanity: rescaled BERTScore must differ from raw by > 0.1 on a garbage fixture.
+
+    Proves rescale_with_baseline=True is actually wired through bert_score_fn.
+    Fixture is the same 'lorem ipsum xyz' vs HFE-perfect_match sentence pair
+    already used by test_freeform_short_confident / test_hfe_garbage_input_low.
+    Empirically: raw F1 ~0.78, rescaled F1 ~-0.30 (clamped to 0.0), delta ~1.08.
+    """
+    pred = "lorem ipsum xyz"
+    ref = "Hartree-Fock extraction yields the Hamiltonian for the lattice model."
+    rescaled_clamped = bert_score_fn(pred, ref)["bert_f1"]
+    # Parallel un-cached BERTScorer for the comparison (different instance, so
+    # the module-level _BERT_SCORER singleton isn't disturbed).
+    from bert_score import BERTScorer
+    raw_scorer = BERTScorer(lang="en", rescale_with_baseline=False, device="cpu")
+    _, _, raw_F1 = raw_scorer.score([pred], [ref])
+    raw = raw_F1.item()
+    assert raw - rescaled_clamped > 0.1, (
+        f"rescaling not engaged: raw={raw}, rescaled+clamped={rescaled_clamped}"
+    )
+
+
+def test_bert_rescaled_clamps_negative_to_zero():
+    """Clamp: when raw rescaled BERTScore is below baseline (negative), bert_score_fn
+    returns exactly 0.0.
+
+    Without the clamp, freeform_geometric would raise on the negative input (the
+    geometric mean's [0,1] domain). 'lorem ipsum xyz' vs scientific GT rescales to
+    ~-0.30; bert_score_fn clamps to 0.0.
+    """
+    pred = "lorem ipsum xyz"
+    ref = "Hartree-Fock extraction yields the Hamiltonian for the lattice model."
+    bert_f1 = bert_score_fn(pred, ref)["bert_f1"]
+    assert bert_f1 == 0.0
+
+
+# ===========================================================================
 # Guard #1 (per-task) — DFT-S
 # ===========================================================================
 
@@ -187,7 +295,9 @@ def test_dft_c_real_gt_example(rubric_default):
 def test_dft_c_garbage_input_low(rubric_default):
     gt = _gt_text(TASK_FOLDER["DFT-C"])
     s = _make_state("DFT-C", "lorem ipsum xyz", gt)
-    assert _aggregate(rubric_default, s) < 0.5
+    # rescaled BERT (anti-length-grift, CLAUDE.md L57-59): garbage clamps to 0.0,
+    # geometric zero-guard collapses the reward; tightened from <0.5 to <0.1.
+    assert _aggregate(rubric_default, s) < 0.1
 
 
 # ===========================================================================
@@ -301,7 +411,8 @@ def test_hfe_real_gt_example(rubric_default):
 def test_hfe_garbage_input_low(rubric_default):
     gt = _gt_text(TASK_FOLDER["HFE"])
     s = _make_state("HFE", "lorem ipsum xyz", gt)
-    assert _aggregate(rubric_default, s) < 0.5
+    # rescaled BERT (anti-length-grift, CLAUDE.md L57-59): tightened <0.5 -> <0.1.
+    assert _aggregate(rubric_default, s) < 0.1
 
 
 # ===========================================================================
@@ -329,7 +440,8 @@ def test_hfd_real_gt_example(rubric_default):
 def test_hfd_garbage_input_low(rubric_default):
     gt = _gt_text(TASK_FOLDER["HFD"])
     s = _make_state("HFD", "lorem ipsum xyz", gt)
-    assert _aggregate(rubric_default, s) < 0.5
+    # rescaled BERT (anti-length-grift, CLAUDE.md L57-59): tightened <0.5 -> <0.1.
+    assert _aggregate(rubric_default, s) < 0.1
 
 
 # ===========================================================================
@@ -357,7 +469,8 @@ def test_qecc_65_real_gt_example(rubric_default):
 def test_qecc_65_garbage_input_low(rubric_default):
     gt = _gt_text(TASK_FOLDER["QECC_65"])
     s = _make_state("QECC_65", "lorem ipsum xyz", gt)
-    assert _aggregate(rubric_default, s) < 0.5
+    # rescaled BERT (anti-length-grift, CLAUDE.md L57-59): tightened <0.5 -> <0.1.
+    assert _aggregate(rubric_default, s) < 0.1
 
 
 # ===========================================================================
@@ -385,7 +498,8 @@ def test_geo_real_gt_example(rubric_default):
 def test_geo_garbage_input_low(rubric_default):
     gt = _gt_text(TASK_FOLDER["GEO"])
     s = _make_state("GEO", "lorem ipsum xyz", gt)
-    assert _aggregate(rubric_default, s) < 0.5
+    # rescaled BERT (anti-length-grift, CLAUDE.md L57-59): tightened <0.5 -> <0.1.
+    assert _aggregate(rubric_default, s) < 0.1
 
 
 # ===========================================================================
@@ -410,16 +524,20 @@ def test_pdb_random_string(rubric_default):
 
 def test_freeform_repetition(rubric_default):
     # 'the the the ...' × 50 — both ROUGE and BERT should flag low semantic content.
+    # rescaled BERT (anti-length-grift, CLAUDE.md L57-59): rescaled F1 ~-0.48 clamps to 0,
+    # zero-guard collapses reward to 0. Tightened from <0.4 to <0.05.
     gt = _gt_text(TASK_FOLDER["HFE"])
     s = _make_state("HFE", "the the the " * 50, gt)
-    assert _aggregate(rubric_default, s) < 0.4
+    assert _aggregate(rubric_default, s) < 0.05
 
 
 def test_freeform_short_confident(rubric_default):
     # Confident-sounding but content-empty — BERT should catch semantic emptiness.
+    # rescaled BERT (anti-length-grift, CLAUDE.md L57-59): rescaled F1 ~0.07 (positive,
+    # doesn't clamp); geometric mean with low ROUGE remains small. Tightened <0.5 -> <0.2.
     gt = _gt_text(TASK_FOLDER["HFE"])
     s = _make_state("HFE", "I am highly confident the answer is correct", gt)
-    assert _aggregate(rubric_default, s) < 0.5
+    assert _aggregate(rubric_default, s) < 0.2
 
 
 # ===========================================================================
@@ -491,9 +609,10 @@ def test_reward_weights_match_yaml(rubric_default):
     assert weights["_llmsim_reward"] == cfg["llm_sim_weight"]
     assert weights["_iou_reward"] == cfg["deterministic_weight"]
     assert weights["_idr_reward"] == cfg["deterministic_weight"]
-    # ROUGE/BERT free-form weights are 0.5 each (sum 1.0); 0.5 == freeform_weight (renamed from lm_score_weight in Stage 3 cleanup)
-    assert weights["_rouge_freeform_reward"] == cfg["freeform_weight"]
-    assert weights["_bert_freeform_reward"] == cfg["freeform_weight"]
+    # updated for geometric coupling (anti-length-grift):
+    # _freeform_geometric_reward wired at deterministic_weight=1.0 (parity with IoU/ID_r);
+    # cfg["freeform_weight"] is LEGACY (no longer wired) — see safeguards.yaml comment.
+    assert weights["_freeform_geometric_reward"] == cfg["deterministic_weight"]
 
 
 def test_judge_model_is_gemini_2_5_pro():
@@ -546,11 +665,12 @@ def test_no_length_penalty_function():
 
 
 def test_zero_anti_hack_reward_functions(rubric_default):
-    # CurieRubric must contain ONLY the 5 headline reward funcs + 2 aux metrics. No others.
+    # updated for geometric coupling (anti-length-grift): ROUGE+BERT free-form pair
+    # collapsed into a single _freeform_geometric_reward. Now 4 headline + 2 aux = 6.
     func_names = sorted(f.__name__ for f in rubric_default.funcs)
     expected = sorted([
         "_llmsim_reward", "_iou_reward", "_idr_reward",
-        "_rouge_freeform_reward", "_bert_freeform_reward",
+        "_freeform_geometric_reward",
         "_aux_rouge_lsum", "_aux_bert_f1",
     ])
     assert func_names == expected
@@ -619,21 +739,18 @@ def test_idr_reward_raises_on_empty_sequence(rubric_default):
                      completion=_pdb_fasta("ACGT"), answer='{"sequence": ""}')
 
 
-def test_freeform_rouge_raises_on_empty_reference(rubric_default):
+def test_freeform_geometric_raises_on_empty_reference(rubric_default):
+    # updated for geometric coupling (anti-length-grift): old ROUGE/BERT pair
+    # collapsed into one reward func; the empty-reference invariant is unchanged.
     with pytest.raises(ValueError):
-        _call_reward(rubric_default, "_rouge_freeform_reward", "HFE",
-                     completion="some prediction text", answer="")
-
-
-def test_freeform_bert_raises_on_empty_reference(rubric_default):
-    with pytest.raises(ValueError):
-        _call_reward(rubric_default, "_bert_freeform_reward", "HFE",
+        _call_reward(rubric_default, "_freeform_geometric_reward", "HFE",
                      completion="some prediction text", answer="")
 
 
 def test_freeform_returns_zero_on_empty_prediction(rubric_default):
     """Strict: empty prediction with valid reference → 0 silently."""
-    score = _call_reward(rubric_default, "_rouge_freeform_reward", "HFE",
+    # updated for geometric coupling (anti-length-grift): function name only.
+    score = _call_reward(rubric_default, "_freeform_geometric_reward", "HFE",
                          completion="", answer="real reference text here")
     assert score == 0.0
 

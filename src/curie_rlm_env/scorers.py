@@ -19,6 +19,40 @@ from bert_score import BERTScorer
 import Levenshtein
 
 
+# --- Free-form geometric coupling (CLAUDE.md guard #7) ----------------------
+# (ROUGE_Lsum/100) ** alpha * BERT_F1 ** (1 - alpha). alpha biased toward
+# ROUGE-L (the un-hackable metric); a zero on either component collapses the
+# reward, closing the length-grift pathway in the prior additive 0.5/0.5 split.
+FREEFORM_ROUGE_EXPONENT = 0.6
+
+# IEEE-754 boundary slop, not a defensive wrap: BERTScore's identity-match
+# F1 can come back as ~1 + 1.2e-7 (verified empirically against roberta-large)
+# because cosine-similarity tensor arithmetic doesn't quite hit 1.0 exactly.
+# Mathematical bound is still [0, 1]; we widen the *check* by this much so
+# float noise at the boundary doesn't crash perfect-match rollouts. The value
+# is passed through unchanged — no clipping, no normalization.
+_FREEFORM_BOUND_SLOP = 1e-6
+
+
+def freeform_geometric(rouge_lsum_norm: float, bert_f1: float) -> float:
+    """Geometric coupling of normalized ROUGE-Lsum and BERTScore F1.
+
+    Inputs must already lie in [0, 1]: the rubric divides ROUGE-Lsum by 100
+    before calling. Zero on either component returns 0.0 — that signal must
+    propagate intact, not be epsilon-smoothed. Inputs outside [0, 1] (beyond
+    IEEE-754 boundary slop) raise.
+    """
+    lo = 0.0 - _FREEFORM_BOUND_SLOP
+    hi = 1.0 + _FREEFORM_BOUND_SLOP
+    for name, val in (("rouge_lsum_norm", rouge_lsum_norm), ("bert_f1", bert_f1)):
+        if not (lo <= val <= hi):
+            raise ValueError(f"freeform_geometric: {name}={val!r} not in [0, 1]")
+    if rouge_lsum_norm == 0.0 or bert_f1 == 0.0:
+        return 0.0
+    alpha = FREEFORM_ROUGE_EXPONENT
+    return (rouge_lsum_norm ** alpha) * (bert_f1 ** (1.0 - alpha))
+
+
 # --- ROUGE-L ----------------------------------------------------------------
 # Verbatim from data/curie/colabs/curie_run_eval.ipynb cell 22.
 
@@ -32,9 +66,9 @@ _ROUGE_SCORE_KEYS = ("rouge1", "rouge2", "rougeLsum")
 _ROUGE_SCORER = rouge_scorer.RougeScorer(list(_ROUGE_SCORE_KEYS))
 
 
-# lru_cache dedupes the rubric's twin call sites — _rouge_freeform_reward
-# (headline, weight 0.5) and _aux_rouge_lsum (weight-0 monitor) hit the same
-# (pred, ref) per rollout, so without caching every rollout pays 2× the work.
+# lru_cache dedupes the rubric's twin call sites — _freeform_geometric_reward
+# (headline) and _aux_rouge_lsum (weight-0 monitor) hit the same (pred, ref)
+# per rollout, so without caching every rollout pays 2× the work.
 # maxsize=128 caps RAM at ~1-2 MB and is well above the ~32 rollouts/step.
 # Module-level _ROUGE_SCORER avoids reconstructing the tokenizer/stopword
 # state on every cache miss.
@@ -48,7 +82,14 @@ def rouge_l(pred: str, ref: str) -> dict[str, float]:
 
 
 # --- BERTScore --------------------------------------------------------------
-# Verbatim from data/curie/colabs/curie_run_eval.ipynb cell 20.
+# Adapted from data/curie/colabs/curie_run_eval.ipynb cell 20. Documented
+# Deviation (Stage 5): rescale_with_baseline=True replaces the Curie default
+# of False — see CLAUDE.md "Documented Deviations from Curie release" and the
+# pre-approved trigger at CLAUDE.md L54-59 (baseline-calibrated BERTScore as
+# the anti-length-grift calibration fix). Rescaling subtracts the random-pair
+# baseline and divides by (1 - baseline), so identity matches still score ~1.0
+# but random-noise inputs score ~0 (raw was ~0.85), and worse-than-baseline
+# inputs go negative — see the F1 clamp below.
 #
 # BERTScorer singleton: the previous `bert_score.score(...)` call re-loaded
 # roberta-large (~1.4 GB) on every invocation — the orchestrator log showed
@@ -56,8 +97,7 @@ def rouge_l(pred: str, ref: str) -> dict[str, float]:
 # overhead per training step. Holding the scorer resident eliminates that.
 # device='cpu' is explicit: the orchestrator process owns 0 GPUs under
 # prime-rl's deployment partitioning, so this stays off the saturated trainer
-# (GPU 1) and vLLM (GPU 0) cards. Math is identical to bert_score.score(...,
-# lang="en", rescale_with_baseline=False) — same defaults, same model.
+# (GPU 1) and vLLM (GPU 0) cards.
 
 _BERT_SCORER: BERTScorer | None = None
 
@@ -66,23 +106,33 @@ def _get_bert_scorer() -> BERTScorer:
     global _BERT_SCORER
     if _BERT_SCORER is None:
         _BERT_SCORER = BERTScorer(
-            lang="en", rescale_with_baseline=False, device="cpu"
+            lang="en", rescale_with_baseline=True, device="cpu"
         )
     return _BERT_SCORER
 
 
-# Same dedupe as rouge_l: _bert_freeform_reward (headline) and _aux_bert_f1
+# Same dedupe as rouge_l: _freeform_geometric_reward (headline) and _aux_bert_f1
 # (monitor) call this twice per rollout with identical args. Caching halves
 # the encoder forward passes per step. maxsize=128 covers ~32 rollouts/step
 # with headroom; entries are tiny (3 floats each).
 @lru_cache(maxsize=128)
 def bert_score_fn(pred: str, ref: str) -> dict[str, float]:
-    """BERTScore precision/recall/F1 with lang='en'. Verbatim Curie cell 20."""
+    """BERTScore precision/recall/F1 with lang='en', rescale_with_baseline=True.
+
+    F1 is clamped to 0.0 at the scorer boundary: rescaled F1 goes negative when
+    the prediction scores below the random-pair baseline (empirically ~-0.30
+    for `'lorem ipsum xyz'` vs scientific GT, ~-0.48 for token-repetition
+    hacks). The downstream geometric-mean combiner needs inputs in [0, 1] —
+    propagating a negative would either raise via the range check or invert the
+    reward sign. Clamping to 0 lets the zero-guard collapse the reward, which
+    is the correct semantic: a below-baseline output gets no free-form credit.
+    Precision/recall are returned raw (debugging signal only, no consumer).
+    """
     precision, recall, F1 = _get_bert_scorer().score([pred], [ref])
     return {
         "bert_precision": precision.item(),
         "bert_recall": recall.item(),
-        "bert_f1": F1.item(),
+        "bert_f1": max(0.0, F1.item()),
     }
 
 

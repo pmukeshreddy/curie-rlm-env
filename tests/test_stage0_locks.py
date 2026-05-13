@@ -31,8 +31,9 @@ def test_llm_sim_weight_is_zero_seven():
     assert _load("safeguards.yaml")["rubric"]["llm_sim_weight"] == 0.7
 
 def test_freeform_weight_is_zero_five():
-    # Renamed from lm_score_weight in Stage 3 cleanup: LMScore was replaced by BERTScore;
-    # the 0.5 value now anchors the free-form ROUGE+BERT 0.5+0.5 split.
+    # updated for geometric coupling (anti-length-grift): freeform_weight is now a LEGACY
+    # field — free-form scoring uses (ROUGE_Lsum/100)^0.6 * BERT_F1^0.4 wired at weight=1.0
+    # in CurieRubric. The 0.5 value is retained for historical reference (CLAUDE.md guard #7).
     assert _load("safeguards.yaml")["rubric"]["freeform_weight"] == 0.5
 
 def test_judge_family_is_not_alibaba():
@@ -74,20 +75,21 @@ def test_dispatcher_geometric_weight_matches_safeguards_deterministic():
     s = _load("safeguards.yaml"); d = _load("rubric_dispatcher.yaml")
     assert d["geometric_tasks"]["weight"] == s["rubric"]["deterministic_weight"]
 
-def test_dispatcher_freeform_rouge_l_weight_is_half():
-    # Stage 3b: free-form weights changed to 0.5 + 0.5 (sum to 1.0 = parity with single-programmatic max)
+def test_dispatcher_freeform_metric_is_geometric():
+    # updated for geometric coupling (anti-length-grift): free-form is one metric, not two.
     d = _load("rubric_dispatcher.yaml")
-    assert d["freeform_tasks"]["metrics"]["rouge_l"]["weight"] == 0.5
+    assert d["freeform_tasks"]["metric"] == "freeform_geometric"
 
-def test_dispatcher_freeform_bert_score_weight_is_half():
-    # Stage 3b: LMScore replaced by BERTScore (Curie released code uses bert_score, not lm_score)
+def test_dispatcher_freeform_formula_lock():
+    # updated for geometric coupling (anti-length-grift): lock the exact formula string.
     d = _load("rubric_dispatcher.yaml")
-    assert d["freeform_tasks"]["metrics"]["bert_score"]["weight"] == 0.5
+    assert d["freeform_tasks"]["formula"] == "(ROUGE_Lsum/100)^0.6 * BERT_F1^0.4"
 
-def test_dispatcher_freeform_weights_sum_to_one():
-    d = _load("rubric_dispatcher.yaml")
-    metrics = d["freeform_tasks"]["metrics"]
-    assert metrics["rouge_l"]["weight"] + metrics["bert_score"]["weight"] == 1.0
+def test_dispatcher_freeform_weight_matches_safeguards_deterministic():
+    # updated for geometric coupling (anti-length-grift): free-form wired at weight=1.0,
+    # parity with programmatic tasks (IoU, ID_r). freeform_weight in safeguards.yaml is LEGACY.
+    s = _load("safeguards.yaml"); d = _load("rubric_dispatcher.yaml")
+    assert d["freeform_tasks"]["weight"] == s["rubric"]["deterministic_weight"]
 
 def test_dft_c_in_freeform():
     # Stage 3b: DFT-C moved retrieval→freeform per Curie release

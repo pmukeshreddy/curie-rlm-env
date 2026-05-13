@@ -5,14 +5,20 @@ locked decisions:
 - DFT-S, DFT-P, MPVE: LLMSim × 0.7  (max 0.7)
 - BIOGR: IoU × 1.0
 - PDB: ID_r × 1.0  (FASTA `>` path only; code-exec branch dropped)
-- DFT-C, HFE, HFD, QECC_65, GEO: ROUGE-Lsum/100 × 0.5 + BERT-F1 × 0.5  (max 1.0)
+- DFT-C, HFE, HFD, QECC_65, GEO: (ROUGE-Lsum/100)^0.6 * BERT-F1^0.4 × 1.0  (max 1.0)
+  where BERT-F1 is rescaled (rescale_with_baseline=True) and clamped to [0,1].
 
 Auxiliary metrics (weight 0, applied to ALL 10 tasks for observability via
-RubricGroup aggregate): rouge_lsum, bert_f1.
+RubricGroup aggregate): rouge_lsum, bert_f1 (also rescaled+clamped — same
+scorer).
 
-NO anti-hack reward functions per Stage 3b: Curie's formulas are length-bounded
-structurally; observability via vf.MonitorRubric (auto-attached by RLMEnv) and
-the weight-0 aux metrics provides hack-detection signal without preempting.
+Stage 5 update (CLAUDE.md guard #7): free-form scoring is a geometric coupling,
+not an additive split — zero on either component collapses the reward, closing
+the length-grift pathway. BERT-F1 is now baseline-rescaled per CLAUDE.md L54-59
+(approved calibration fix), with the negative-tail clamped to 0 at the scorer
+boundary so the geometric domain stays valid. The set of headline reward
+FUNCTIONS is still minimal (no anti-hack guards bolted onto the rubric); the
+change is to the free-form scoring formula only.
 """
 from __future__ import annotations
 
@@ -22,7 +28,7 @@ from typing import Any, Callable, Optional
 import json5
 import verifiers as vf
 
-from .scorers import bert_score_fn, id_r, iou, llm_sim, rouge_l
+from .scorers import bert_score_fn, freeform_geometric, id_r, iou, llm_sim, rouge_l
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -57,8 +63,7 @@ class CurieRubric(vf.Rubric):
         self.add_reward_func(self._llmsim_reward, weight=0.7)
         self.add_reward_func(self._iou_reward, weight=1.0)
         self.add_reward_func(self._idr_reward, weight=1.0)
-        self.add_reward_func(self._rouge_freeform_reward, weight=0.5)
-        self.add_reward_func(self._bert_freeform_reward, weight=0.5)
+        self.add_reward_func(self._freeform_geometric_reward, weight=1.0)
         # Auxiliary observability metrics (weight 0 — applied to all tasks).
         self.add_metric(self._aux_rouge_lsum)
         self.add_metric(self._aux_bert_f1)
@@ -199,7 +204,7 @@ class CurieRubric(vf.Rubric):
             return 0.0
         return float(score)
 
-    async def _rouge_freeform_reward(self, prompt, completion, answer, state, task, info, **kwargs) -> float:
+    async def _freeform_geometric_reward(self, prompt, completion, answer, state, task, info, **kwargs) -> float:
         task_id = self._task_id(info, task)
         if task_id not in _FREEFORM_TASKS:
             return 0.0
@@ -210,20 +215,9 @@ class CurieRubric(vf.Rubric):
         pred_text = self._extract_pred(completion, state)
         if not pred_text.strip():
             return 0.0
-        return float(rouge_l(pred_text, answer)["rougeLsum"] / 100.0)
-
-    async def _bert_freeform_reward(self, prompt, completion, answer, state, task, info, **kwargs) -> float:
-        task_id = self._task_id(info, task)
-        if task_id not in _FREEFORM_TASKS:
-            return 0.0
-        if not isinstance(answer, str) or not answer:
-            raise ValueError(
-                f"CurieRubric[{task_id}]: reference answer is empty or not a string"
-            )
-        pred_text = self._extract_pred(completion, state)
-        if not pred_text.strip():
-            return 0.0
-        return float(bert_score_fn(pred_text, answer)["bert_f1"])
+        rouge_norm = rouge_l(pred_text, answer)["rougeLsum"] / 100.0
+        bert_f1 = bert_score_fn(pred_text, answer)["bert_f1"]
+        return float(freeform_geometric(rouge_norm, bert_f1))
 
     # ------- Auxiliary observability metrics (weight 0, all tasks) ---------
 

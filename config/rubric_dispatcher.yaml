@@ -1,7 +1,8 @@
 # Per-task Rubric dispatcher — locked per CLAUDE.md lines 22-25 verbatim.
 # Routes each Curie task to its scoring metric and weight.
 # Reward weights mirror config/safeguards.yaml `rubric` section
-# (deterministic_weight=1.0, llm_sim_weight=0.7, freeform_weight=0.5).
+# (deterministic_weight=1.0, llm_sim_weight=0.7; freeform_weight is LEGACY
+# post-Stage-5 — free-form is now wired at weight=1.0, geometric coupling).
 # DO NOT add tasks. DO NOT change metrics. DO NOT alter weights.
 #
 # Stage 3b updates (locked):
@@ -12,8 +13,13 @@
 #  * Free-form scorers: rouge_l + bert_score (was rouge_l + lm_score). LMScore
 #    is paper-only — Curie's released code uses BERTScore. See CLAUDE.md
 #    "Documented Deviations from Curie".
-#  * Free-form weights: 0.5 + 0.5 (was 1.0 + 0.5). Sum = 1.0 = parity with
-#    single-programmatic tasks.
+#
+# Stage 5 update (anti-length-grift, CLAUDE.md guard #7):
+#  * Free-form scoring: (ROUGE_Lsum/100) + BERT_F1 additive 0.5/0.5 →
+#    (ROUGE_Lsum/100)^0.6 * BERT_F1^0.4 geometric coupling. Single metric,
+#    wired at weight=1.0 in CurieRubric. Max free-form contribution unchanged
+#    at 1.0 (parity with programmatic tasks). freeform_weight in safeguards.yaml
+#    is now a LEGACY field (no longer wired through).
 
 retrieval_tasks:
   ids: ["DFT-S", "DFT-P", "MPVE"]
@@ -33,11 +39,9 @@ structural_tasks:
 
 freeform_tasks:
   ids: ["DFT-C", "HFE", "HFD", "QECC_65", "GEO"]
-  metrics:
-    rouge_l:
-      weight: 0.5                              # ROUGE-Lsum/100 (Curie cell 22)
-    bert_score:
-      weight: 0.5                              # BERT F1, lang="en" (Curie cell 20)
+  metric: "freeform_geometric"                 # (ROUGE_Lsum/100)^0.6 * BERT_F1^0.4 (anti-length-grift; CLAUDE.md guard #7)
+  formula: "(ROUGE_Lsum/100)^0.6 * BERT_F1^0.4"
+  weight: 1.0                                  # wired at weight=1.0 in CurieRubric; max free-form contribution 1.0 (parity with programmatic tasks)
 
 # CLAUDE.md L28: "Optional: pass@k (threshold-based, e.g. F1>0.5 for retrieval, ROUGE-L>0.3 for free-form)."
 pass_at_k_thresholds:

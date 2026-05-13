@@ -13,7 +13,10 @@ rubric:
   priority: "deterministic"
   deterministic_weight: 1.0
   llm_sim_weight: 0.7
-  freeform_weight: 0.5                     # renamed from lm_score_weight (Stage 3b: LMScore replaced by BERTScore in dispatcher); anchors free-form ROUGE+BERT 0.5+0.5 split
+  freeform_weight: 0.5                     # LEGACY: documented prior 0.5/0.5 additive split (Stage 3b).
+                                           # Stage 5: free-form scoring switched to geometric coupling
+                                           # (r^0.6 * b^0.4 wired at weight=1.0). This field is no longer
+                                           # wired through. See CLAUDE.md guard #7.
   freeze_judge: true
   judge_model_family: "gemini-2.5-pro"     # locked judge per config/judge.yaml; different family from Qwen (Alibaba)
   length_penalty: true

@@ -29,6 +29,7 @@ Rubric must act as dispatcher:
 - Free-form: BERTScore (Curie's released `_SHARED_METRCS`) replaces paper-only LMScore (no implementation in `colabs/curie_run_eval.ipynb`).
 - DFT-C: scored as free-form (ROUGE-L + BERTScore) per Curie cell 30 — `_FULL_ADDITIONAL_METRICS["dft"]` registers LLMSim only for DFT-S/P, not DFT-C.
 - Stage 4 (SFT) skipped — no SFT data for RLM on Curie. Cold-start GRPO per DeepSeek-R1-Zero precedent. Stage 5.5 RFT is contingency.
+- BERTScore for free-form: `rescale_with_baseline=True` replaces the Curie cell 20 default of `False`. Pre-approved at CLAUDE.md L54-59 ("BERTScore baseline calibration"). Activation reason: raw BERTScore floors at ~0.85 for any English text, leaving a tiny garbage-vs-content gradient that under-detects length-grift; rescaling subtracts the random-pair baseline so floor ≈ 0. Rescaled F1 can be negative when the prediction is below baseline (empirically ~-0.30 for `lorem ipsum` vs scientific GT); clamped to 0 inside `bert_score_fn` so the geometric-mean combiner's [0,1] domain stays valid. Triggers the documented exception to the L62 preemption rule.
 
 Algorithm naming:
 - prime-rl default loss is DPPO+KL with DR-GRPO advantages (per docs/bring-your-own-algorithms.md, Stage 5a memo).
@@ -74,6 +75,13 @@ Optional: pass@k (threshold-based, e.g. F1>0.5 for retrieval, ROUGE-L>0.3 for fr
    - Programmatic (IoU, ID_r, ROUGE-L) → weight 1.0
    - LLMSim → weight 0.7
    - BERTScore → weight 0.5
+7. Free-form length-grift coupling (DFT-C, HFE, HFD, QECC_65, GEO): geometric mean
+   (ROUGE_Lsum/100)^0.6 * BERT_F1^0.4 replaces additive 0.5·ROUGE_L + 0.5·BERT_F1.
+   BERT_F1 is rescaled (rescale_with_baseline=True) and clamped to [0, 1] at the
+   scorer boundary — see Documented Deviations entry. Zero on either component returns
+   0 (signal must propagate); out-of-[0,1] inputs raise.
+   Reward func wired at weight=1.0; max free-form contribution remains 1.0 (parity with
+   programmatic tasks). freeform_weight in safeguards.yaml is now a legacy field.
 
 ## Sub-Agent Policy (Automatic)
 For any task with 2+ independent parts, act as orchestrator and spawn minimum single-responsibility sub-agents in parallel: brainstormer, reviewer, tester.
