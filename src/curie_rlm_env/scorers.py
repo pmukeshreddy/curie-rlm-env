@@ -7,6 +7,7 @@ documented inline and in CLAUDE.md "Documented Deviations from Curie".
 from __future__ import annotations
 
 import math
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable
@@ -215,6 +216,109 @@ def id_r(pred_seq: str, gt_seq: str) -> dict[str, Any]:
     }
 
 
+# --- Numeric-value verifier (CLAUDE.md guard #2) ----------------------------
+# Deterministic post-LLM filter on LLMSim's match decisions. Closes the
+# within-record verbosity grift on numeric fields: Gemini might accept
+# "2.5 eV (measured at 300K via photoluminescence, reported in Table 3)" as
+# matching a GT bandgap of "2.1 eV" because the surrounding prose is plausible;
+# the verifier revokes that match on a 20% magnitude disagreement (tolerance
+# locked at 5% per CLAUDE.md guard #2 / config/safeguards.yaml:43). Strictly
+# post-LLM, strictly a filter — can only revoke, never add matches.
+#
+# °C is intentionally excluded from temperature aliases: K↔°C is affine
+# (offset 273.15), not multiplicative, and our converter is factor-only.
+# In-scope unit families per the spec: energy, length, inverse-length, temperature.
+
+_UNIT_CONVERSIONS: dict[str, tuple[str, float]] = {
+    # energy → eV
+    "eV": ("eV", 1.0),
+    "meV": ("eV", 1e-3),
+    "electron-volts": ("eV", 1.0),
+    "electron-volt": ("eV", 1.0),
+    "electronvolts": ("eV", 1.0),
+    "J": ("J", 1.0),
+    "kcal/mol": ("kcal/mol", 1.0),
+    # length → Å
+    "Å": ("Å", 1.0),
+    "angstrom": ("Å", 1.0),
+    "angstroms": ("Å", 1.0),
+    "nm": ("Å", 10.0),
+    "pm": ("Å", 0.01),
+    # inverse-length → cm⁻¹
+    "cm⁻¹": ("cm⁻¹", 1.0),
+    "1/cm": ("cm⁻¹", 1.0),
+    # temperature → K
+    "K": ("K", 1.0),
+    "Kelvin": ("K", 1.0),
+    "kelvin": ("K", 1.0),
+}
+
+# Longest aliases first so "electron-volts" wins over "eV" and "kcal/mol" wins
+# over "K". Right-boundary lookahead avoids partial matches inside larger words.
+_NUM_UNIT_RE = re.compile(
+    r"(?:~|≈|approximately\s+)?\s*"
+    r"([-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)"
+    r"\s*"
+    r"(" + "|".join(re.escape(u) for u in sorted(_UNIT_CONVERSIONS, key=len, reverse=True)) + r")"
+    r"(?=$|[\s,;.()\[\]])"
+)
+
+
+def _extract_numeric_values(record: dict) -> dict[str, tuple[float, str]]:
+    """Per-record numeric extractor. Walks top-level string fields, returns
+    {field: (canonical_magnitude, canonical_unit)} for each parseable numeric.
+
+    Strategy: find the FIRST (magnitude, unit) match in the value via
+    _NUM_UNIT_RE; convert to canonical via _UNIT_CONVERSIONS. Unparseable
+    fields are omitted (not zero, not None — silently absent so the verifier
+    knows it has no opinion on that field). Non-string values (nested dicts,
+    ints, bools, lists) are skipped — text-field fuzziness is the LLM's job.
+    """
+    out: dict[str, tuple[float, str]] = {}
+    if not isinstance(record, dict):
+        return out
+    for field, value in record.items():
+        if not isinstance(value, str):
+            continue
+        m = _NUM_UNIT_RE.search(value)
+        if not m:
+            continue
+        try:
+            mag = float(m.group(1))
+        except ValueError:
+            continue
+        unit_raw = m.group(2)
+        canonical_unit, factor = _UNIT_CONVERSIONS[unit_raw]
+        out[field] = (mag * factor, canonical_unit)
+    return out
+
+
+def _verify_numeric_match(
+    ref_record: dict, pred_record: dict, tolerance: float = 0.05,
+) -> bool:
+    """Programmatic spot-check after LLMSim. Returns True iff every numeric
+    field present in BOTH records agrees in canonical unit AND within `tolerance`
+    relative error. If no field overlaps on parseable numerics, returns True
+    (verifier abstains — that's "no opinion", not a fallback).
+
+    Tolerance default 5% locked per CLAUDE.md guard #2.
+    """
+    ref_nums = _extract_numeric_values(ref_record)
+    pred_nums = _extract_numeric_values(pred_record)
+    overlap = ref_nums.keys() & pred_nums.keys()
+    if not overlap:
+        return True
+    for field in overlap:
+        ref_mag, ref_unit = ref_nums[field]
+        pred_mag, pred_unit = pred_nums[field]
+        if ref_unit != pred_unit:
+            return False
+        denom = max(abs(ref_mag), abs(pred_mag), 1e-12)
+        if abs(ref_mag - pred_mag) / denom > tolerance:
+            return False
+    return True
+
+
 # --- LLMSim -----------------------------------------------------------------
 # Adapted from data/curie/colabs/curie_run_eval.ipynb cells 14 + 18 (verbatim
 # parsing + match counting). Empty-input NaN replaced with 0.0 for numeric
@@ -274,6 +378,26 @@ def llm_sim(
             output_json = output_json[0]
         eval_list.append(output_json)
 
+    # Programmatic numeric verifier (CLAUDE.md guard #2): post-filter on
+    # Gemini's match decisions, revoking claimed matches where any overlapping
+    # numeric field disagrees beyond 5% relative tolerance. Strictly post-LLM,
+    # strictly a filter — can only revoke, never add matches. See
+    # _verify_numeric_match docstring for abstain semantics.
+    verifier_revoked_count = 0
+    for j, item in enumerate(eval_list):
+        if not isinstance(item, dict) or "json_extracted_index" not in item:
+            continue
+        pred_index = item["json_extracted_index"]
+        if not isinstance(pred_index, int) or not (0 <= pred_index < len(json_pred)):
+            continue
+        ref_record = json_ref[j]
+        pred_record = json_pred[pred_index]
+        if not (isinstance(ref_record, dict) and isinstance(pred_record, dict)):
+            continue
+        if not _verify_numeric_match(ref_record, pred_record, tolerance=0.05):
+            del item["json_extracted_index"]
+            verifier_revoked_count += 1
+
     # Verbatim Curie cell 18 (eval_overall_result) with NaN → 0.0 substitution.
     num_match = sum(1 for item in eval_list if "json_extracted_index" in item)
     num_gt = len(json_ref)
@@ -293,4 +417,5 @@ def llm_sim(
         "num_match": num_match,
         "num_gt": num_gt,
         "num_response": num_response,
+        "verifier_revoked_count": verifier_revoked_count,
     }

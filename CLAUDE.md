@@ -29,6 +29,7 @@ Rubric must act as dispatcher:
 - Free-form: BERTScore (Curie's released `_SHARED_METRCS`) replaces paper-only LMScore (no implementation in `colabs/curie_run_eval.ipynb`).
 - DFT-C: scored as free-form (ROUGE-L + BERTScore) per Curie cell 30 — `_FULL_ADDITIONAL_METRICS["dft"]` registers LLMSim only for DFT-S/P, not DFT-C.
 - Stage 4 (SFT) skipped — no SFT data for RLM on Curie. Cold-start GRPO per DeepSeek-R1-Zero precedent. Stage 5.5 RFT is contingency.
+- LLMSim numeric-value verifier: `scorers.llm_sim` post-filters Gemini's per-GT match decisions with a deterministic numeric verifier (5% relative tolerance, CLAUDE.md guard #2; tolerance locked in `config/safeguards.yaml:43`). Closes the within-record verbosity-grift pathway where Gemini accepts a "2.1 eV (measured ... reported in Table 3)" string as matching the GT "2.1 eV" but would also accept "2.5 eV (same prose dressing)" — the verifier revokes the second. Cell 18 verbatim `num_match` logic is preserved upstream of the filter; only the count of matches changes. New return key: `verifier_revoked_count`. Filter, not generator: cannot add matches Gemini didn't claim.
 - BERTScore for free-form: `rescale_with_baseline=True` replaces the Curie cell 20 default of `False`. Pre-approved at CLAUDE.md L54-59 ("BERTScore baseline calibration"). Activation reason: raw BERTScore floors at ~0.85 for any English text, leaving a tiny garbage-vs-content gradient that under-detects length-grift; rescaling subtracts the random-pair baseline so floor ≈ 0. Rescaled F1 can be negative when the prediction is below baseline (empirically ~-0.30 for `lorem ipsum` vs scientific GT); clamped to 0 inside `bert_score_fn` so the geometric-mean combiner's [0,1] domain stays valid. Triggers the documented exception to the L62 preemption rule.
 
 Algorithm naming:
@@ -67,7 +68,13 @@ Optional: pass@k (threshold-based, e.g. F1>0.5 for retrieval, ROUGE-L>0.3 for fr
 
 ## Reward Hacking Guards (Strictly Enforced)
 1. Freeze judge model (Gemini or Claude — different family from Qwen policy).
-2. Programmatic spot-check after LLMSim (numeric tolerance <5%).
+2. Programmatic spot-check after LLMSim (numeric tolerance <5%). Implemented
+   in `scorers.llm_sim` as a deterministic numeric-value verifier that
+   FILTERS Gemini's per-GT match decisions — it can revoke matches where any
+   overlapping numeric field disagrees beyond tolerance, but never adds
+   matches Gemini didn't claim. `verifier_revoked_count` logged per rollout
+   in the return dict. In-scope unit families: energy, length, inverse-length,
+   temperature (°C excluded — affine conversion out of scope).
 3. Length penalty for outputs significantly longer than ground-truth average (~954 words).
 4. Use exact frozen prompts from Curie repo (never "improve").
 5. Sanity batch every ~100 GRPO steps (log 5 random rollouts).

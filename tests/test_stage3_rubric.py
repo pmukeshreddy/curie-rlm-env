@@ -854,6 +854,123 @@ def test_llm_sim_raises_on_empty_judge_list():
     clear_cache()
 
 
+# ===========================================================================
+# Guard #2 — LLMSim post-LLM numeric verifier (anti-verbosity-grift)
+# ===========================================================================
+
+def test_extract_numeric_values_per_unit_family():
+    """One representative per in-scope unit family."""
+    from curie_rlm_env.scorers import _extract_numeric_values
+    assert _extract_numeric_values({"bandgap": "2.1 eV"}) == {"bandgap": (2.1, "eV")}
+    assert _extract_numeric_values({"freq": "21000 cm⁻¹"}) == {"freq": (21000.0, "cm⁻¹")}
+    assert _extract_numeric_values({"temp": "300 K"}) == {"temp": (300.0, "K")}
+    assert _extract_numeric_values({"latt": "5.4 Å"}) == {"latt": (5.4, "Å")}
+
+
+def test_extract_numeric_values_within_record_verbosity_grift():
+    """Regression guard: same canonical value despite prose dressing.
+
+    The verbosity-grift attack: pad a wrong numeric with plausible prose to
+    fool Gemini into accepting it. Extractor must return the SAME (mag, unit)
+    pair as the bare value — only then can the verifier compare apples-to-apples.
+    """
+    from curie_rlm_env.scorers import _extract_numeric_values
+    bare = _extract_numeric_values({"bandgap": "2.1 eV"})
+    dressed = _extract_numeric_values(
+        {"bandgap": "2.1 eV, measured at 300K via photoluminescence, reported in Table 3"}
+    )
+    assert bare == dressed == {"bandgap": (2.1, "eV")}
+
+
+def test_extract_numeric_values_unparseable_field_is_omitted():
+    """Unparseable values are OMITTED — not coerced to 0, not None.
+
+    Verifier downstream relies on "absent from extraction" meaning "no opinion
+    on this field". Coercing to 0 would silently treat "see Figure 3" as a
+    zero-magnitude match candidate.
+    """
+    from curie_rlm_env.scorers import _extract_numeric_values
+    result = _extract_numeric_values({"v": "see Figure 3"})
+    assert result == {}
+    assert "v" not in result  # explicit: not absent-with-None, just absent
+
+
+def test_verify_numeric_match_cases():
+    """Each case from the spec, with hand-computed relative errors."""
+    from curie_rlm_env.scorers import _verify_numeric_match
+    # Identical → True
+    assert _verify_numeric_match({"x": "2.0 eV"}, {"x": "2.0 eV"})
+    # 4% disagreement → True (0.08/2.08 = 0.0385 < 0.05)
+    assert _verify_numeric_match({"x": "2.0 eV"}, {"x": "2.08 eV"})
+    # 6% disagreement → False (0.12/2.12 = 0.0566 > 0.05)
+    assert not _verify_numeric_match({"x": "2.0 eV"}, {"x": "2.12 eV"})
+    # Different units, different families → False
+    assert not _verify_numeric_match({"x": "2.0 eV"}, {"x": "2.0 Å"})
+    # Different unit, convertible alias (electron-volts → eV) → True
+    assert _verify_numeric_match({"x": "2.1 eV"}, {"x": "2.1 electron-volts"})
+    # Within-family multiplicative conversion (meV → eV): 2000 meV = 2.0 eV → True
+    assert _verify_numeric_match({"x": "2000 meV"}, {"x": "2.0 eV"})
+    # No overlapping numeric fields → True (verifier abstains)
+    assert _verify_numeric_match({"name": "abc"}, {"bandgap": "2.1 eV"})
+
+
+def _always_match_judge(_prompt: str) -> str:
+    """Mock judge: unconditionally claims a match against pred index 0."""
+    return '{"json_extracted_index": 0, "compare": {}}'
+
+
+def test_llm_sim_verifier_revokes_false_match_on_numeric_disagreement():
+    """Gemini says match, numerics disagree by 20% → verifier revokes.
+
+    ref = [{"bandgap": "2.0 eV"}], pred = [{"bandgap": "2.5 eV"}]
+    rel_error = 0.5 / 2.5 = 0.20 > 0.05 → revoke.
+    Expected: num_match=0, verifier_revoked_count=1, f1=0.
+    """
+    from curie_rlm_env.judge_cache import clear_cache
+
+    prompt_path = _FROZEN_PROMPTS / "dft_structure.txt"
+    if not prompt_path.is_file():
+        pytest.skip("LLMSim prompt file not present in this checkout")
+    clear_cache()
+
+    result = llm_sim(
+        json_pred=[{"bandgap": "2.5 eV"}],
+        json_ref=[{"bandgap": "2.0 eV"}],
+        prompt_path=str(prompt_path),
+        judge_client=_always_match_judge,
+    )
+    assert result["num_match"] == 0
+    assert result["verifier_revoked_count"] == 1
+    assert result["f1"] == 0.0
+    clear_cache()
+
+
+def test_llm_sim_verifier_keeps_match_on_numeric_agreement():
+    """Gemini says match, numerics agree → verifier preserves.
+
+    ref = [{"bandgap": "2.0 eV"}], pred = [{"bandgap": "2.0 eV"}]
+    rel_error = 0 → keep.
+    Expected: num_match=1, verifier_revoked_count=0, f1=1.0.
+    """
+    from curie_rlm_env.judge_cache import clear_cache
+
+    prompt_path = _FROZEN_PROMPTS / "dft_structure.txt"
+    if not prompt_path.is_file():
+        pytest.skip("LLMSim prompt file not present in this checkout")
+    clear_cache()
+
+    result = llm_sim(
+        json_pred=[{"bandgap": "2.0 eV"}],
+        json_ref=[{"bandgap": "2.0 eV"}],
+        prompt_path=str(prompt_path),
+        judge_client=_always_match_judge,
+    )
+    assert result["num_match"] == 1
+    assert result["verifier_revoked_count"] == 0
+    assert result["f1"] == 1.0
+    clear_cache()
+
+
 def test_scorers_llm_sim_does_not_have_repair_branch():
     """Defensive: source must not contain the deleted JSON-repair regex pattern."""
     src = (

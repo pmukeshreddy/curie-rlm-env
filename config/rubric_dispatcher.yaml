@@ -26,6 +26,9 @@ retrieval_tasks:
   metric: "llmsim"
   submetrics: ["precision", "recall", "F1"]
   weight: 0.7                                  # llm_sim_weight from safeguards.yaml
+  # Stage 5: Gemini matches are post-filtered by a deterministic numeric verifier
+  # (CLAUDE.md guard #2, 5% relative tolerance). Filter-only — cannot add matches.
+  # Implementation: scorers.llm_sim → _verify_numeric_match. See Documented Deviations.
 
 geometric_tasks:
   ids: ["BIOGR"]
