@@ -104,17 +104,42 @@ async def run_one(client: ZMQEnvClient, example: dict, idx: int) -> dict[str, An
                 "extra_body": {"tool_choice": "required"},
             },
         )
-        # RolloutOutput(dict) — top-level fields only. Custom state keys like
-        # `_curie_submit_answer_calls` and `final_answer` are NOT here unless
-        # state_columns explicitly named them. The orchestrator-relevant signals
-        # are these standard fields:
+        # RolloutOutput(dict). Top-level standard fields plus state_to_output
+        # flattens state["metrics"] (the per-reward-func dict from RubricGroup)
+        # to top-level keys. So the per-reward-func breakdown is right here:
+        # output["_freeform_geometric_reward"], output["_aux_rouge_lsum"], etc.
+        # Custom state keys like state["final_answer"] do NOT survive
+        # serialization unless state_columns names them.
+        info = output.get("info") or {}
+        completion = output.get("completion")
+        completion_tail = ""
+        if isinstance(completion, list) and completion:
+            last = completion[-1]
+            content = (
+                last.get("content") if isinstance(last, dict)
+                else getattr(last, "content", "")
+            )
+            if isinstance(content, str):
+                completion_tail = content[-200:]
         return {
             "idx": idx,
             "is_completed": output.get("is_completed", False),
             "stop_condition": output.get("stop_condition"),
             "reward": output.get("reward", 0.0),
+            "task_id": info.get("task_id"),
+            "task": output.get("task"),
             "answer_present": bool(output.get("answer")),
             "answer_len": len(output.get("answer") or ""),
+            "completion_tail": completion_tail,
+            # Per-reward-func breakdown (flattened from state["metrics"]).
+            "freeform_geometric": output.get("_freeform_geometric_reward"),
+            "llmsim": output.get("_llmsim_reward"),
+            "diou": output.get("_diou_reward"),
+            "idr": output.get("_idr_reward"),
+            "aux_rouge_lsum": output.get("_aux_rouge_lsum"),
+            "aux_bert_f1": output.get("_aux_bert_f1"),
+            "aux_diou_raw": output.get("_aux_diou_raw"),
+            "metric_keys": sorted(k for k in output.keys() if k.startswith("_")),
             "error": output.get("error"),
         }
     except Exception as exc:
@@ -194,13 +219,61 @@ async def amain() -> int:
             else:
                 print(
                     f"  R{r['idx']:>2}: "
+                    f"task_id={r['task_id']!r} task={r['task']!r} "
                     f"is_completed={r['is_completed']} "
                     f"stop={r['stop_condition']!r} "
                     f"reward={r['reward']:.4f} "
-                    f"gt_answer_present={r['answer_present']} "
                     f"gt_answer_len={r['answer_len']}",
                     flush=True,
                 )
+                print(
+                    f"        per-reward: "
+                    f"freeform={r['freeform_geometric']!r} "
+                    f"llmsim={r['llmsim']!r} "
+                    f"diou={r['diou']!r} "
+                    f"idr={r['idr']!r} "
+                    f"aux_rouge={r['aux_rouge_lsum']!r} "
+                    f"aux_bert={r['aux_bert_f1']!r} "
+                    f"aux_diou_raw={r['aux_diou_raw']!r}",
+                    flush=True,
+                )
+                if r["idx"] <= 3:
+                    print(
+                        f"        metric_keys={r['metric_keys']}",
+                        flush=True,
+                    )
+                    print(
+                        f"        completion_tail={r['completion_tail']!r}",
+                        flush=True,
+                    )
+
+        # Diagnostic summary across all rollouts so the next-step root cause
+        # is obvious from the verdict alone (no log spelunking).
+        def _all(getter):
+            xs = [getter(r) for r in results if not r.get("error")]
+            return all(x is not None and x == 0.0 for x in xs)
+
+        all_freeform_zero = _all(lambda r: r["freeform_geometric"])
+        all_aux_rouge_zero = _all(lambda r: r["aux_rouge_lsum"])
+        all_aux_bert_zero_or_neg = all(
+            (r["aux_bert_f1"] is not None and r["aux_bert_f1"] <= 0.0)
+            for r in results if not r.get("error")
+        )
+        any_aux_rouge_pos = any(
+            (r["aux_rouge_lsum"] or 0.0) > 0.0
+            for r in results if not r.get("error")
+        )
+        any_aux_bert_pos = any(
+            (r["aux_bert_f1"] or 0.0) > 0.0
+            for r in results if not r.get("error")
+        )
+
+        print("\nDiagnostic summary:", flush=True)
+        print(f"  all _freeform_geometric_reward == 0:   {all_freeform_zero}", flush=True)
+        print(f"  all _aux_rouge_lsum == 0:              {all_aux_rouge_zero}", flush=True)
+        print(f"  all _aux_bert_f1 <= 0:                 {all_aux_bert_zero_or_neg}", flush=True)
+        print(f"  any _aux_rouge_lsum > 0:               {any_aux_rouge_pos}", flush=True)
+        print(f"  any _aux_bert_f1 > 0:                  {any_aux_bert_pos}", flush=True)
 
         print("\n--- VERDICT ---", flush=True)
         if n_completed == 0:
@@ -220,8 +293,19 @@ async def amain() -> int:
             print(f"BUG REPRODUCED: {n_completed}/{n_total} rollouts terminated, ALL with reward=0.0.", flush=True)
             print("  → State propagation is healthy; rubric is returning zero on every rollout.", flush=True)
             print("  → DAPO online_difficulty_filtering would reject every group → trainer stuck.", flush=True)
-            print("  → Next: dump state['final_answer'] vs state['answer'] (ground truth) for one", flush=True)
-            print("    rollout from worker logs to see WHY rubric returns 0.", flush=True)
+            # Use the diagnostic summary above to pinpoint which rubric path zeros out.
+            if all_aux_rouge_zero and all_aux_bert_zero_or_neg:
+                print("  → Both auxiliary metrics are 0 → either pred_text is empty (state[final_answer]", flush=True)
+                print("    not reaching rubric) OR the model output produced nothing scorable.", flush=True)
+                print("    Inspect completion_tail above + worker stderr for submit_answer SUCCESS lines.", flush=True)
+            elif any_aux_rouge_pos and all_aux_bert_zero_or_neg:
+                print("  → ROUGE > 0 but BERT clamped to 0 (rescaled below baseline). Geometric mean = 0.", flush=True)
+                print("    Likely policy is producing low-semantic text; rescale baseline is too strict for this domain.", flush=True)
+            elif all_aux_rouge_zero and any_aux_bert_pos:
+                print("  → BERT > 0 but ROUGE = 0. Stopword filter may be eating all tokens; verify on a real sample.", flush=True)
+            else:
+                print("  → Both ROUGE and BERT have non-zero rollouts but freeform reward = 0 anyway.", flush=True)
+                print("    Means the per-rollout coupling is the problem (not the inputs).", flush=True)
             verdict_code = 3
         else:
             print(f"HEALTHY at env_worker ZMQ subprocess boundary:", flush=True)
