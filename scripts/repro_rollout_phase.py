@@ -1,87 +1,90 @@
-"""Reproduce the has_final_answer=False bug end-to-end against REAL vLLM.
+"""Debug the rollout phase end-to-end without vLLM or training.
 
-No mocks. No GPU on this script itself — but it does call the production
-vLLM server (Qwen3-8B on the training pod's GPU). Everything else is
-production code path:
+THIS IS WHAT'S MOCKED — and only this:
+  env.get_model_response — returns a hardcoded ChatCompletion with a
+  submit_answer tool call. We control the model's output so the rollout
+  ALWAYS attempts submit_answer; otherwise cold-start Qwen3 picks
+  call_python_repl half the time and we can't isolate the state bug.
 
-  - Real CurieRLMEnv (Stage 5 phase 1 free-form, same as training)
-  - Real Docker sandbox (submit_answer's _execute_code is real)
-  - Real verifiers rollout loop in multiturn_env
-  - Real RLMEnv.env_response, real @vf.stop predicates, real active_rollouts
-  - Real vLLM call via OpenAIChatCompletionsClient
-  - Real Qwen3-8B Hermes tool-call parsing
+THIS IS REAL — everything else, byte-for-byte production code:
+  - CurieRLMEnv(continual_phase=1, split="train")
+  - Real Docker sandbox via LocalDockerRLMExecutor
+  - submit_answer running _execute_code on the sandbox
+  - multiturn_env.rollout() — the actual loop the training uses
+  - RLMEnv.env_response, RLMEnv.active_rollouts setup, _setup_interception_and_register
+  - All @vf.stop predicates (answer_ready, answer_schema_valid, has_final_env_response,
+    max_turns_reached, has_error, prompt_too_long, max_total_completion_tokens_reached)
+  - All @vf.cleanup hooks
+  - update_tool_args injecting state into submit_answer
+  - The ZMQ-free in-process path (no env_worker, no orchestrator)
 
-What it skips:
-  - prime-rl trainer (no weight updates, no checkpoints)
-  - prime-rl orchestrator (no ZMQ env_worker, no DAPO filter, no batching)
-
-That's the whole point: if has_final_answer=False shows up here too, the bug
-is in the rollout loop or below. If everything is HEALTHY, the bug requires
-the orchestrator/ZMQ layer.
-
-Env vars required:
-  INFERENCE_SERVER_IP   host[:port] of the running vLLM (e.g. 127.0.0.1:8000)
-  VLLM_API_KEY          (optional, vLLM accepts any string; default 'EMPTY')
-
-Optional:
-  REPRO_MODEL           model id served by vLLM (default Qwen/Qwen3-8B)
-  REPRO_NUM_ROLLOUTS    how many rollouts to run (default 4)
-  REPRO_MAX_TURNS       override CurieRLMEnv max_turns (default 12)
+ONE command, no vLLM, no training, no GPU on the script itself (the sandbox
+is CPU-only). Prints state at every iteration of the rollout loop so you can
+see exactly when (or if) state["final_answer"] disappears.
 
 Run:
-    INFERENCE_SERVER_IP=127.0.0.1:8000 uv run python scripts/repro_rollout_phase.py
+    uv run python scripts/repro_rollout_phase.py
 """
 from __future__ import annotations
 
 import asyncio
-import os
+import json
 import sys
 from typing import Any
 
+from openai.types.chat import (
+    ChatCompletion,
+    ChatCompletionMessage,
+    ChatCompletionMessageToolCall,
+)
+from openai.types.chat.chat_completion import Choice
+from openai.types.chat.chat_completion_message_function_tool_call import Function
+
 from curie_rlm_env import CurieRLMEnv
-from verifiers.types import ClientConfig
 
 
-def vllm_client_config() -> ClientConfig:
-    raw = os.environ.get("INFERENCE_SERVER_IP")
-    if not raw:
-        sys.exit(
-            "ERROR: set INFERENCE_SERVER_IP to the vLLM host[:port]. "
-            "Example: INFERENCE_SERVER_IP=127.0.0.1:8000"
-        )
-    if "://" not in raw:
-        raw = f"http://{raw}"
-    base_url = raw.rstrip("/")
-    if not base_url.endswith("/v1"):
-        base_url = base_url + "/v1"
-    # vLLM accepts any non-empty API key; the env var name is read by the
-    # framework at request time (os.environ[api_key_var]).
-    os.environ.setdefault("VLLM_API_KEY", "EMPTY")
-    return ClientConfig(
-        client_type="openai_chat_completions",
-        api_base_url=base_url,
-        api_key_var="VLLM_API_KEY",
-        reasoning_parser="deepseek_r1",  # same as production CLI flag
+def fake_submit_answer_response(answer_text: str) -> ChatCompletion:
+    """Same shape Qwen3+Hermes emits in production — just no network call."""
+    tool_call = ChatCompletionMessageToolCall(
+        id="tc_repro_submit_1",
+        type="function",
+        function=Function(
+            name="submit_answer",
+            arguments=json.dumps({"content": answer_text}),
+        ),
+    )
+    return ChatCompletion(
+        id="repro_completion_1",
+        object="chat.completion",
+        created=0,
+        model="repro-mock",
+        choices=[
+            Choice(
+                index=0,
+                finish_reason="tool_calls",
+                message=ChatCompletionMessage(
+                    role="assistant",
+                    content="",
+                    tool_calls=[tool_call],
+                ),
+            )
+        ],
     )
 
 
-def install_iteration_probe(env: CurieRLMEnv, label: str) -> None:
-    """Log state across every rollout-loop iteration BEFORE/AFTER is_completed.
-
-    is_completed runs at the head of each iteration; it sees state as left by
-    the previous iteration's tool dispatch. That's exactly where the bug
-    should surface — if submit_answer set state["final_answer"] last iteration
-    and is_completed doesn't see it this iteration, the state propagation gap
-    is concrete and reproducible.
+def install_probes(env: CurieRLMEnv, answer_text: str) -> dict[str, Any]:
+    """Wrap is_completed (every loop iter) + get_model_response (mocked LLM).
+    Returns a stats dict the caller reads after the rollout finishes.
     """
-    orig = env.is_completed
-    counter = {"n": 0}
+    stats: dict[str, Any] = {"iter": 0, "model_calls": 0}
 
-    async def probed(state, **kwargs):
-        counter["n"] += 1
-        i = counter["n"]
+    orig_is_completed = env.is_completed
+
+    async def probed_is_completed(state, **kwargs):
+        stats["iter"] += 1
+        i = stats["iter"]
         print(
-            f"[{label} ITER {i:>2}] BEFORE is_completed | "
+            f"[ITER {i:>2}] BEFORE is_completed | "
             f"id_state={id(state)} "
             f"rollout_id={state.get('rollout_id')!r} "
             f"final_answer_in_state={'final_answer' in state} "
@@ -89,118 +92,96 @@ def install_iteration_probe(env: CurieRLMEnv, label: str) -> None:
             f"root_llm_turns={state.get('root_llm_turns', 0)} "
             f"trajectory_len={len(state.get('trajectory', []))} "
             f"final_env_response_set={state.get('final_env_response') is not None} "
-            f"is_truncated={state.get('is_truncated', False)} "
-            f"prompt_too_long={state.get('prompt_too_long', False)}"
+            f"_rlm_stop_error={state.get('_rlm_stop_error') is not None}"
         )
-        result = await orig(state, **kwargs)
+        result = await orig_is_completed(state, **kwargs)
         print(
-            f"[{label} ITER {i:>2}] AFTER  is_completed | "
+            f"[ITER {i:>2}] AFTER  is_completed | "
             f"→ {result} stop_condition={state.get('stop_condition')!r}"
         )
         return result
 
-    env.is_completed = probed  # type: ignore[method-assign]
+    async def fake_get_model_response(state, prompt_messages, **kwargs):
+        stats["model_calls"] += 1
+        print(f"[MODEL] call #{stats['model_calls']} (trajectory len={len(state.get('trajectory', []))})")
+        return fake_submit_answer_response(answer_text)
 
-
-async def run_one(env: CurieRLMEnv, client_cfg: ClientConfig, example: dict, model: str, label: str) -> dict[str, Any]:
-    install_iteration_probe(env, label)
-
-    state = await env.rollout(
-        input=example,
-        client=client_cfg,
-        model=model,
-        sampling_args={"temperature": 1.0, "max_completion_tokens": 4096},
-    )
-
-    summary = {
-        "rollout_id": state.get("rollout_id"),
-        "is_completed": state.get("is_completed"),
-        "stop_condition": state.get("stop_condition"),
-        "final_answer_in_state": "final_answer" in state,
-        "final_answer_len": len(state["final_answer"]) if "final_answer" in state else 0,
-        "_curie_submit_answer_calls": state.get("_curie_submit_answer_calls", 0),
-        "root_llm_turns": state.get("root_llm_turns", 0),
-        "sub_llm_call_count": state.get("sub_llm_call_count", 0),
-        "trajectory_len": len(state.get("trajectory", [])),
-        "is_truncated": state.get("is_truncated", False),
-        "prompt_too_long": state.get("prompt_too_long", False),
-    }
-    return summary
+    env.is_completed = probed_is_completed  # type: ignore[method-assign]
+    env.get_model_response = fake_get_model_response  # type: ignore[method-assign]
+    return stats
 
 
 async def main() -> None:
-    print("=== Repro: real vLLM rollout phase ===")
-    client_cfg = vllm_client_config()
-    print(f"vLLM base_url: {client_cfg.api_base_url}")
-    model = os.environ.get("REPRO_MODEL", "Qwen/Qwen3-8B")
-    print(f"model:         {model}")
-    num_rollouts = int(os.environ.get("REPRO_NUM_ROLLOUTS", "4"))
-    print(f"num_rollouts:  {num_rollouts}")
-    print()
-
-    print("Constructing CurieRLMEnv(continual_phase=1, split='train') …")
+    print("=== Rollout-phase repro ===")
+    print("Constructing real CurieRLMEnv(continual_phase=1, split='train') …")
     env = CurieRLMEnv(continual_phase=1, split="train")
     ds = env.get_dataset()
-    print(f"  → dataset has {len(ds)} examples\n")
-
-    if max_turns_override := os.environ.get("REPRO_MAX_TURNS"):
-        env.max_turns = int(max_turns_override)
-        print(f"  → overrode env.max_turns to {env.max_turns}\n")
-
-    summaries: list[dict[str, Any]] = []
-    for i in range(num_rollouts):
-        example = ds[i % len(ds)]
-        print(f"\n────── ROLLOUT {i+1}/{num_rollouts} (example task={example.get('task')!r}) ──────")
-        try:
-            summary = await run_one(env, client_cfg, example, model, label=f"R{i+1}")
-        except Exception as exc:
-            summary = {"error": f"{type(exc).__name__}: {exc}", "rollout_id": None}
-            print(f"  EXCEPTION: {summary['error']}")
-        summaries.append(summary)
-        print(f"\nROLLOUT {i+1} SUMMARY: {summary}")
-
-    print("\n\n=== AGGREGATE ===")
-    n_total = len(summaries)
-    n_with_final = sum(1 for s in summaries if s.get("final_answer_in_state"))
-    n_submit_called = sum(1 for s in summaries if s.get("_curie_submit_answer_calls", 0) > 0)
-    n_error = sum(1 for s in summaries if "error" in s)
-    print(f"  rollouts:                 {n_total}")
-    print(f"  errored:                  {n_error}")
-    print(f"  submit_answer called ≥1:  {n_submit_called}")
-    print(f"  final_answer in state:    {n_with_final}")
+    print(f"  → real dataset has {len(ds)} examples")
+    print(f"  → real env.max_turns = {env.max_turns}")
+    print(f"  → real sandbox client = {type(env._executor.sandbox_client).__name__}")
     print()
-    print("Per-rollout breakdown:")
-    for i, s in enumerate(summaries, 1):
-        if "error" in s:
-            print(f"  R{i}: ERROR {s['error']}")
-        else:
-            print(
-                f"  R{i}: rollout_id={s['rollout_id']!r} "
-                f"stop={s['stop_condition']!r} "
-                f"submit_calls={s['_curie_submit_answer_calls']} "
-                f"final_answer={s['final_answer_in_state']}"
-            )
+
+    stats = install_probes(env, answer_text="THE REPRO FINAL ANSWER")
+
+    example = ds[0]
+    print(f"Running ONE rollout against example task={example.get('task')!r}\n")
+
+    state = await env.rollout(
+        input=example,
+        client=None,        # bypassed by our fake_get_model_response
+        model="repro-mock",
+        sampling_args=None,
+    )
+
+    print("\n=== FINAL STATE ===")
+    print(f"  rollout_id:                 {state.get('rollout_id')!r}")
+    print(f"  is_completed:               {state.get('is_completed')}")
+    print(f"  stop_condition:             {state.get('stop_condition')!r}")
+    print(f"  'final_answer' in state:    {'final_answer' in state}")
+    if "final_answer" in state:
+        fa = state["final_answer"]
+        print(f"  final_answer (len={len(fa)}): {fa[:120]!r}{'…' if len(fa) > 120 else ''}")
+    print(f"  _curie_submit_answer_calls: {state.get('_curie_submit_answer_calls', 'MISSING')}")
+    print(f"  model calls made:           {stats['model_calls']}")
+    print(f"  is_completed iterations:    {stats['iter']}")
+    print(f"  trajectory steps:           {len(state.get('trajectory', []))}")
+    print(f"  root_llm_turns:             {state.get('root_llm_turns', 0)}")
+    print(f"  sub_llm_call_count:         {state.get('sub_llm_call_count', 0)}")
+    print(f"  final_env_response:         {'SET' if state.get('final_env_response') else 'None'}")
 
     print("\n--- VERDICT ---")
-    if n_submit_called > 0 and n_with_final == 0:
-        print("BUG REPRODUCED: submit_answer was called but no rollout ended with final_answer in state.")
-        print("→ Iteration logs above show exactly when state[\"final_answer\"] disappears.")
-        print("→ This proves the bug lives in the rollout loop / RLMEnv layer; NOT in")
-        print("  the orchestrator or env_worker IPC.")
+    submit_calls = state.get("_curie_submit_answer_calls", 0)
+    has_final = "final_answer" in state
+    stop = state.get("stop_condition")
+
+    if submit_calls > 0 and not has_final:
+        print("BUG REPRODUCED:")
+        print(f"  submit_answer ran {submit_calls} time(s) successfully,")
+        print(f"  but state ended with NO 'final_answer'. Rollout terminated via")
+        print(f"  stop_condition={stop!r} instead of answer_ready/answer_schema_valid.")
+        print("\n  → State mutations from submit_answer are NOT propagating to the")
+        print("    @vf.stop predicate state. Bug confirmed in the rollout loop layer.")
+        print("    Look at the ITER lines above — compare _curie_submit_calls and")
+        print("    final_answer_in_state across iterations. Whichever iter shows")
+        print("    submit_calls go up but final_answer_in_state stays False is where")
+        print("    the state mutation got dropped.")
         sys.exit(1)
-    elif n_submit_called == 0:
-        print("INCONCLUSIVE: model never called submit_answer in any rollout.")
-        print("→ Cold-start Qwen3-8B sometimes doesn't emit the tool. Run with")
-        print("  REPRO_NUM_ROLLOUTS=16 to give it more samples.")
+    elif submit_calls == 0:
+        print("UNEXPECTED:")
+        print("  Mocked model never reached submit_answer (it should be EVERY call).")
+        print("  Something in the framework's tool-dispatch chain rejected the call.")
+        print("  Check the ITER logs for stop_condition or errors.")
         sys.exit(2)
-    elif n_with_final == n_submit_called:
-        print(f"HEALTHY: {n_with_final}/{n_submit_called} rollouts that called submit_answer terminated with final_answer.")
-        print("→ Bug does NOT reproduce in the standalone rollout loop.")
-        print("→ The orchestrator / env_worker IPC is the suspect.")
+    elif has_final and stop in {"answer_ready", "answer_schema_valid", "has_final_env_response"}:
+        print(f"HEALTHY: rollout terminated via {stop!r} with final_answer set.")
+        print(f"  submit_answer ran {submit_calls} time(s); state propagation works.")
+        print("  → Bug does NOT reproduce in the standalone rollout loop.")
+        print("  → Production bug requires the orchestrator/env_worker IPC layer or")
+        print("    concurrent rollouts. Next: stress test with asyncio.gather(N=32+).")
         sys.exit(0)
     else:
-        print(f"PARTIAL: {n_with_final}/{n_submit_called} rollouts terminated correctly.")
-        print("→ Bug is intermittent in the rollout loop. Concurrency hypothesis still alive.")
+        print(f"WEIRD: submit_calls={submit_calls} has_final={has_final} stop={stop!r}")
+        print("  Read the ITER logs and tell me what happened.")
         sys.exit(3)
 
 
