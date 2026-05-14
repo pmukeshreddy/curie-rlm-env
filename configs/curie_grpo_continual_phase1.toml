@@ -49,6 +49,18 @@ args = { continual_phase = 1, split = "train", seed = 42 }
 [orchestrator.train.sampling]
 max_completion_tokens = 4096
 
+[orchestrator.train.sampling.extra_body]
+# Issue B fix: force vLLM to emit a structured tool call every turn instead of
+# letting cold-start Qwen3 write `submit_answer(content="...")` as prose in the
+# content field. With tool_choice="required", vLLM applies guided/constrained
+# decoding so the response always has a populated tool_calls array — Hermes
+# parser never returns tool_calls=[NONE], no_tools_called @vf.stop never fires
+# spuriously. Curie has exactly two tools (call_python_repl, submit_answer);
+# every Curie turn is supposed to be a tool call anyway, so this matches the
+# task semantics without SFT warmup. Verified by curl against vLLM:
+#   curl ... -d '{"tool_choice":"required",...}' → tool_calls populated.
+tool_choice = "required"
+
 [trainer]
 # prime-rl defaults (DPPO+KL with DR-GRPO advantages):
 #   kl_tau, dppo_mask_high, dppo_mask_low, adv_tau

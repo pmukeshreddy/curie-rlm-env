@@ -36,6 +36,11 @@ args = { continual_phase = 2, split = "train", seed = 42 }
 [orchestrator.train.sampling]
 max_completion_tokens = 4096
 
+[orchestrator.train.sampling.extra_body]
+# Issue B fix: vLLM guided-decoding so every turn produces a structured tool call.
+# See configs/curie_grpo_continual_phase1.toml for the full rationale.
+tool_choice = "required"
+
 [trainer]
 # prime-rl defaults: kl_tau, dppo_mask_high, dppo_mask_low, adv_tau
 
