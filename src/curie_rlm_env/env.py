@@ -191,6 +191,38 @@ class CurieRLMEnv(RLMEnv):
         self._executor.sandbox_client.teardown(wait=False)
         self._executor = LocalDockerRLMExecutor(self)
         self.add_tool(self.submit_answer, args_to_skip=["state"])
+
+        # is_completed runs at the TOP of every rollout-loop iteration; it sees state
+        # as left by the previous iteration's env_response/tool dispatch. Wrapping it
+        # gives us id(state) at the loop boundary — cross-reference against the
+        # `submit_answer SUCCESS` and `answer_schema_valid` lines for the same
+        # rollout_id. If id_state at the loop boundary differs from id_state inside
+        # submit_answer, prime-rl's env_worker is copying the state dict between
+        # tool dispatch and the next loop iteration (root cause of Issue A: the
+        # `_curie_submit_answer_calls=0` paradox under 963 successful submits).
+        _orig_is_completed = self.is_completed
+
+        async def _probed_is_completed(state, **kwargs):
+            _dbg(
+                f"is_completed ENTRY rollout_id={state.get('rollout_id')!r} "
+                f"id_state={id(state)} "
+                f"state_keys={sorted(state.keys())} "
+                f"_curie_submit_answer_calls={state.get('_curie_submit_answer_calls', 0)} "
+                f"final_answer_in_state={'final_answer' in state} "
+                f"root_llm_turns={state.get('root_llm_turns', 0)} "
+                f"trajectory_len={len(state.get('trajectory', []))}"
+            )
+            result = await _orig_is_completed(state, **kwargs)
+            _dbg(
+                f"is_completed EXIT rollout_id={state.get('rollout_id')!r} "
+                f"id_state={id(state)} "
+                f"result={result} "
+                f"stop_condition={state.get('stop_condition')!r}"
+            )
+            return result
+
+        self.is_completed = _probed_is_completed  # type: ignore[method-assign]
+
         _dbg(
             f"CurieRLMEnv ready task_id={self.task_id} continual_phase={self.continual_phase} "
             f"interception_url_override={self._interception_url_override!r} "
@@ -228,6 +260,8 @@ class CurieRLMEnv(RLMEnv):
             content_head = content_arg[:120] if isinstance(content_arg, str) else repr(content_arg)[:120]
             _dbg(
                 f"update_tool_args submit_answer rollout_id={state.get('rollout_id')!r} "
+                f"id_state={id(state)} "
+                f"state_keys={sorted(state.keys())} "
                 f"tool_args_keys={sorted(tool_args.keys())} "
                 f"content_type={type(content_arg).__name__} "
                 f"content_len={len(content_arg) if isinstance(content_arg, str) else 'n/a'} "
@@ -243,6 +277,8 @@ class CurieRLMEnv(RLMEnv):
         state["_curie_submit_answer_calls"] = state.get("_curie_submit_answer_calls", 0) + 1
         _dbg(
             f"submit_answer ENTRY rollout_id={state.get('rollout_id')!r} "
+            f"id_state={id(state)} "
+            f"state_keys={sorted(state.keys())} "
             f"call_n={state['_curie_submit_answer_calls']} "
             f"content_type={type(content).__name__} "
             f"content_len={len(content) if isinstance(content, str) else 'n/a'} "
@@ -281,6 +317,10 @@ class CurieRLMEnv(RLMEnv):
         state["final_answer"] = answer["content"]
         _dbg(
             f"submit_answer SUCCESS rollout_id={state.get('rollout_id')!r} "
+            f"id_state={id(state)} "
+            f"state_keys_after_mutation={sorted(state.keys())} "
+            f"final_answer_in_state={'final_answer' in state} "
+            f"_curie_submit_answer_calls_after={state.get('_curie_submit_answer_calls', 0)} "
             f"final_answer_len={len(state['final_answer'])}"
         )
         return "Final answer submitted."
@@ -329,8 +369,14 @@ class CurieRLMEnv(RLMEnv):
         # root_llm_* and *_call_count fields tell us whether the root model and tools
         # ran at all. `error` is the upstream rollout error (if any). submit_answer_calls
         # is the CurieRLMEnv-only counter — proves whether the model actually invoked the tool.
+        # id_state + state_keys: cross-reference against `submit_answer SUCCESS` lines
+        # for the same rollout_id. If id_state differs or _curie_submit_answer_calls is
+        # missing from state_keys here despite a prior SUCCESS log, prime-rl is swapping
+        # the state dict between tool dispatch and stop-predicate evaluation.
         _dbg(
             f"answer_schema_valid rollout_id={state.get('rollout_id')!r} "
+            f"id_state={id(state)} "
+            f"state_keys={sorted(state.keys())} "
             f"has_final_answer={has_final} answer={ans_repr} "
             f"submit_answer_calls={state.get('_curie_submit_answer_calls', 0)} "
             f"tool_map_keys={sorted(self.tool_map.keys())} "
