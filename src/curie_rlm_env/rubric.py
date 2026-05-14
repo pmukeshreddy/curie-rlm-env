@@ -6,19 +6,21 @@ locked decisions:
 - BIOGR: IoU × 1.0
 - PDB: ID_r × 1.0  (FASTA `>` path only; code-exec branch dropped)
 - DFT-C, HFE, HFD, QECC_65, GEO: (ROUGE-Lsum/100)^0.6 * BERT-F1^0.4 × 1.0  (max 1.0)
-  where BERT-F1 is rescaled (rescale_with_baseline=True) and clamped to [0,1].
+  where BERT-F1 is the Curie cell 20 default (raw, no baseline rescale).
 
 Auxiliary metrics (weight 0, applied to ALL 10 tasks for observability via
-RubricGroup aggregate): rouge_lsum, bert_f1 (also rescaled+clamped — same
-scorer).
+RubricGroup aggregate): rouge_lsum, bert_f1 (raw F1 — same scorer).
 
 Stage 5 update (CLAUDE.md guard #7): free-form scoring is a geometric coupling,
 not an additive split — zero on either component collapses the reward, closing
-the length-grift pathway. BERT-F1 is now baseline-rescaled per CLAUDE.md L54-59
-(approved calibration fix), with the negative-tail clamped to 0 at the scorer
-boundary so the geometric domain stays valid. The set of headline reward
-FUNCTIONS is still minimal (no anti-hack guards bolted onto the rubric); the
-change is to the free-form scoring formula only.
+the length-grift pathway. BERT-F1 uses Curie cell 20 verbatim (raw, no
+baseline rescale); the previous Stage 5 deviation (rescale_with_baseline=True)
+was reverted after the Stage 3b ZMQ harness on Phase 1 data showed that the
+rescaled F1 went uniformly negative for baseline Qwen3-8B rollouts and
+collapsed every rollout's reward to 0 (DAPO online_difficulty_filtering then
+rejected every group → trainer stuck at step 0). See CLAUDE.md "Documented
+Deviations from Curie release" entry for the W&B evidence and the rule
+("defenses are added with W&B evidence in Stage 5+, never preemptively").
 """
 from __future__ import annotations
 
@@ -224,11 +226,11 @@ class CurieRubric(vf.Rubric):
         if not pred_text.strip():
             return 0.0
         rouge_norm = rouge_l(pred_text, answer)["rougeLsum"] / 100.0
-        # bert_score_fn returns the raw rescaled F1 (can be negative for below-
-        # baseline outputs — the diagnostic signal _aux_bert_f1 needs to keep).
-        # Geometric mean's domain is [0, 1]; below-baseline = no free-form credit,
-        # so clamp to 0 here at the consumption site and let the zero-guard
-        # inside freeform_geometric collapse the reward.
+        # bert_score_fn returns raw BERTScore F1 (Curie cell 20 verbatim, no
+        # baseline rescale) — strictly in [0, 1], with a high English floor so
+        # the geometric coupling stays well-defined for every rollout. The clamp
+        # below is a defensive bound (max(0, raw) is a no-op on the raw scale,
+        # but kept as explicit input-domain enforcement for freeform_geometric).
         bert_f1_raw = bert_score_fn(pred_text, answer)["bert_f1"]
         bert_f1_for_geometric = max(0.0, bert_f1_raw)
         return float(freeform_geometric(rouge_norm, bert_f1_for_geometric))
@@ -242,10 +244,10 @@ class CurieRubric(vf.Rubric):
         return float(rouge_l(pred_text, answer)["rougeLsum"])
 
     async def _aux_bert_f1(self, prompt, completion, answer, state, task, info, **kwargs) -> float:
-        # Logs raw rescaled BERTScore F1 (can be negative for below-baseline
-        # outputs). This is the diagnostic signal Stage 5 W&B uses to track the
-        # length-grift distribution — do NOT clamp here; the headline reward's
-        # clamp is at the consumption site in _freeform_geometric_reward.
+        # Logs raw BERTScore F1 (Curie cell 20 verbatim — no baseline rescale).
+        # F1 is in [0, 1] with a high English floor (~0.85). Used for Stage 5
+        # W&B observability across all 10 tasks; the headline reward consumes
+        # the same scorer in _freeform_geometric_reward.
         pred_text = self._extract_pred(completion, state)
         if not pred_text.strip() or not answer:
             return 0.0

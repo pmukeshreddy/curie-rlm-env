@@ -31,9 +31,9 @@ Rubric must act as dispatcher:
 - Stage 4 (SFT) skipped — no SFT data for RLM on Curie. Cold-start GRPO per DeepSeek-R1-Zero precedent. Stage 5.5 RFT is contingency.
 - PDB id_r length-floored + length-normalized: `scorers.id_r` adds an absolute 30-residue floor and a 0.3-fraction-of-reference floor BEFORE alignment; predictions below either floor return `identity_ratio=0.0` and `length_floor_rejected=True` (the latter is a new return-dict field, logged for Stage 5 W&B). Denominator switched from `len(best_alignment[0])` (alignment length with internal gaps) to `max(len_pred, len_ref)` for an explicit length-normalized identity. Aligner scoring is set explicitly to match=1/mismatch=0/gap=-1 (Biopython default, but pinned so a future library change can't silently grant BLOSUM credit). Strict-identity rather than biological-similarity is the right RL reward shape — note this distinction is intentional.
 - BIOGR DIoU replaces plain IoU: `scorers.diou` (renamed from `iou`) implements Distance-IoU (Zheng et al. 2020): `DIoU = IoU - ρ²(centers) / c²(enclosing diagonal)`, output in [-1, 1]. Closes the sparse-gradient cliff of plain IoU (which returns exactly 0 for any non-overlap regardless of how close). Antimeridian-crossing bboxes (W>E) are split into [W,180] and [-180,E] sub-bboxes before intersection/union; centers computed in a shifted frame. Strict bbox validation: S>=N, |lat|>90, zero-area bboxes raise ValueError instead of silently scoring 0. Reward clamped to [0, 1] at `rubric._diou_reward` consumption site (same pattern as rescaled-BERT clamp); raw negative output reaches `_aux_diou_raw` for Stage 5 W&B diagnostics.
-- ROUGE-L stopword filtering: `scorers.rouge_l` wires a custom Tokenizer that drops English function words (NLTK stopword list, embedded inline — no nltk-data download required at runtime) AFTER the library's stemming step. Empirically the stopword-only content-free baseline drops from ~13/100 to 0/100 on scientific GT; legitimate content-rich predictions score within a few % of the pre-filter result. Triggered by the interaction with the free-form geometric coupling: rescaled BERT clamps the semantic-only hack, but stopword-grift on ROUGE-L could still produce non-trivial reward.
+- ROUGE-L stopword filtering: `scorers.rouge_l` wires a custom Tokenizer that drops English function words (NLTK stopword list, embedded inline — no nltk-data download required at runtime) AFTER the library's stemming step. Empirically the stopword-only content-free baseline drops from ~13/100 to 0/100 on scientific GT; legitimate content-rich predictions score within a few % of the pre-filter result. Originally triggered by the interaction with the free-form geometric coupling: rescaled BERT was meant to clamp the semantic-only hack, but stopword-grift on ROUGE-L could still produce non-trivial reward. After the rescale revert (above), the stopword filter is the only remaining anti-grift signal on the ROUGE-L side and is therefore retained.
 - LLMSim numeric-value verifier: `scorers.llm_sim` post-filters Gemini's per-GT match decisions with a deterministic numeric verifier (5% relative tolerance, CLAUDE.md guard #2; tolerance locked in `config/safeguards.yaml:43`). Closes the within-record verbosity-grift pathway where Gemini accepts a "2.1 eV (measured ... reported in Table 3)" string as matching the GT "2.1 eV" but would also accept "2.5 eV (same prose dressing)" — the verifier revokes the second. Cell 18 verbatim `num_match` logic is preserved upstream of the filter; only the count of matches changes. New return key: `verifier_revoked_count`. Filter, not generator: cannot add matches Gemini didn't claim.
-- BERTScore for free-form: `rescale_with_baseline=True` replaces the Curie cell 20 default of `False`. Pre-approved at CLAUDE.md L54-59 ("BERTScore baseline calibration"). Activation reason: raw BERTScore floors at ~0.85 for any English text, leaving a tiny garbage-vs-content gradient that under-detects length-grift; rescaling subtracts the random-pair baseline so floor ≈ 0. Rescaled F1 can be negative when the prediction is below baseline (empirically ~-0.30 for `lorem ipsum` vs scientific GT); clamped to 0 inside `bert_score_fn` so the geometric-mean combiner's [0,1] domain stays valid. Triggers the documented exception to the L62 preemption rule.
+- BERTScore for free-form: Curie cell 20 verbatim — `BERTScorer(lang="en")` with library defaults (no baseline rescale). The earlier Stage 5 deviation `rescale_with_baseline=True` was REVERTED based on Stage 3b ZMQ harness W&B evidence: 16/16 baseline Qwen3-8B rollouts on Phase 1 free-form data produced rescaled BERT_F1 in [-0.77, -0.16] (uniformly below the random English baseline). The `max(0.0, raw)` clamp in `_freeform_geometric_reward` zeroed every rollout, the geometric mean's zero-guard collapsed every reward, DAPO `online_difficulty_filtering=true` rejected every group, and the trainer was stuck at step 0 forever. CLAUDE.md L62 ("defenses are added with W&B evidence in Stage 5+, never preemptively") is the rule that mandates this revert: rescaling was a preemptive anti-length-grift defense, the empirical evidence shows it kills the reward signal, so the revert restores Curie's documented behavior. Length-grift remains a Stage 5 watch item and will be addressed with a targeted output-length cap (or rescaling re-enabled with a different consumer-side combiner) once we have W&B evidence of length-grift, not before.
 
 Algorithm naming:
 - prime-rl default loss is DPPO+KL with DR-GRPO advantages (per docs/bring-your-own-algorithms.md, Stage 5a memo).
@@ -57,11 +57,11 @@ Stage 6 skipped. Original placeholder ("mixing + online refinement") had no conc
 Stage 7 = internal results only. External comparisons (Curie paper baselines, frontier models) deferred to post-Stage-7 narrative work once internal numbers are in hand. Report generator hard-fails on missing required eval JSON keys (no soft 0.0 defaults). std is optional (rendered "n/a" if absent on small-N tasks).
 
 BERTScore baseline calibration:
-- Curie uses bert_score(lang="en") verbatim — we inherit this.
+- Curie uses bert_score(lang="en") verbatim — we inherit this (raw, no rescale).
 - Random English vs scientific text scores ~0.7-0.85 (uncalibrated baseline).
-- Garbage-vs-content gradient on free-form tasks is therefore small (floor ~0.4-0.5 with our 0.5+0.5 ROUGE/BERT weighting).
-- Stage 5 watch item: if free-form reward curves flatten during GRPO, evaluate bert_score(rescale_with_baseline=True) as a calibration fix.
-- Not blocking; documented for future debugging continuity.
+- Garbage-vs-content gradient on free-form tasks is therefore small.
+- Stage 5 W&B evidence (Stage 3b ZMQ harness, 16/16 baseline rollouts, 2026-05-14): rescale_with_baseline=True forced ALL Phase 1 rollouts below baseline (rescaled F1 in [-0.77, -0.16]) and zeroed every reward, hanging the trainer at step 0. The rescaling deviation has been REVERTED — see the BERTScore entry under "Documented Deviations from Curie release" above.
+- Length-grift watch: if a real W&B trace (Stage 5, post-revert) shows length-grift drift, address with a per-task output-length cap inside `_freeform_geometric_reward` (or revisit the consumer-side combiner so a re-enabled rescale doesn't zero the reward). Do not silently re-enable rescaling without a paired combiner change.
 
 ## Stage 3 reward design (locked)
 Zero anti-hack reward functions in CurieRubric. Curie's formulas (ROUGE/BERT/IoU/ID_r) are length-bounded structurally; observability via auto-attached `RLMMonitorRubric` plus weight-0 ROUGE+BERT auxiliary metrics on all 10 tasks. Defenses are added with W&B evidence in Stage 5+, never preemptively.
@@ -87,11 +87,15 @@ Optional: pass@k (threshold-based, e.g. F1>0.5 for retrieval, ROUGE-L>0.3 for fr
    - BERTScore → weight 0.5
 7. Free-form length-grift coupling (DFT-C, HFE, HFD, QECC_65, GEO): geometric mean
    (ROUGE_Lsum/100)^0.6 * BERT_F1^0.4 replaces additive 0.5·ROUGE_L + 0.5·BERT_F1.
-   BERT_F1 is rescaled (rescale_with_baseline=True) and clamped to [0, 1] at the
-   scorer boundary — see Documented Deviations entry. ROUGE-L is computed with
-   English stopword filtering (custom tokenizer in scorers.py) — drops the
-   content-free baseline from ~13/100 to ~0/100. Zero on either component returns
-   0 (signal must propagate); out-of-[0,1] inputs raise.
+   BERT_F1 is the Curie cell 20 default (raw, no baseline rescale) — the earlier
+   `rescale_with_baseline=True` deviation was reverted with W&B evidence (see
+   the BERTScore entry under "Documented Deviations from Curie release"). The
+   `max(0.0, raw)` clamp at the consumption site in `_freeform_geometric_reward`
+   is now a defensive no-op on raw BERT (which lives in [0, 1]) but is kept as
+   explicit input-domain enforcement for `freeform_geometric`. ROUGE-L is
+   computed with English stopword filtering (custom tokenizer in scorers.py)
+   — drops the content-free baseline from ~13/100 to ~0/100. Zero on either
+   component returns 0 (signal must propagate); out-of-[0,1] inputs raise.
    Reward func wired at weight=1.0; max free-form contribution remains 1.0 (parity with
    programmatic tasks). freeform_weight in safeguards.yaml is now a legacy field.
 

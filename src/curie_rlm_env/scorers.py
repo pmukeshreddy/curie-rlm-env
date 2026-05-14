@@ -147,14 +147,21 @@ def rouge_l(pred: str, ref: str) -> dict[str, float]:
 
 
 # --- BERTScore --------------------------------------------------------------
-# Adapted from data/curie/colabs/curie_run_eval.ipynb cell 20. Documented
-# Deviation (Stage 5): rescale_with_baseline=True replaces the Curie default
-# of False — see CLAUDE.md "Documented Deviations from Curie release" and the
-# pre-approved trigger at CLAUDE.md L54-59 (baseline-calibrated BERTScore as
-# the anti-length-grift calibration fix). Rescaling subtracts the random-pair
-# baseline and divides by (1 - baseline), so identity matches still score ~1.0
-# but random-noise inputs score ~0 (raw was ~0.85), and worse-than-baseline
-# inputs go negative — see the F1 clamp below.
+# Verbatim Curie cell 20: BERTScorer(lang="en") with library defaults. The
+# previous Stage 5 deviation flipped rescale_with_baseline to True (CLAUDE.md
+# L54-59 pre-approval) on the assumption that legitimate predictions would
+# score positive on the rescaled scale. The Stage 3b ZMQ harness on Phase 1
+# data refuted that assumption: 16/16 baseline Qwen3-8B rollouts produced
+# rescaled BERT_F1 in [-0.77, -0.16] — uniformly below the random English
+# baseline. That zero-clamp at the consumption site collapsed the geometric
+# coupling for every rollout, DAPO online_difficulty_filtering rejected every
+# group, and the trainer was stuck at step 0. CLAUDE.md L62 ("defenses are
+# added with W&B evidence in Stage 5+, never preemptively") is the project
+# rule that mandates this revert: rescaling was a preemptive anti-length-grift
+# defense, the empirical evidence from the harness shows it kills the reward
+# signal, so we revert to the Curie default. Length-grift is a Stage 5 watch
+# item and will be addressed with a different mechanism (e.g. an output-length
+# cap inside _freeform_geometric_reward) once we have W&B evidence of it.
 #
 # BERTScorer singleton: the previous `bert_score.score(...)` call re-loaded
 # roberta-large (~1.4 GB) on every invocation — the orchestrator log showed
@@ -170,9 +177,7 @@ _BERT_SCORER: BERTScorer | None = None
 def _get_bert_scorer() -> BERTScorer:
     global _BERT_SCORER
     if _BERT_SCORER is None:
-        _BERT_SCORER = BERTScorer(
-            lang="en", rescale_with_baseline=True, device="cpu"
-        )
+        _BERT_SCORER = BERTScorer(lang="en", device="cpu")
     return _BERT_SCORER
 
 
@@ -182,18 +187,13 @@ def _get_bert_scorer() -> BERTScorer:
 # with headroom; entries are tiny (3 floats each).
 @lru_cache(maxsize=128)
 def bert_score_fn(pred: str, ref: str) -> dict[str, float]:
-    """BERTScore precision/recall/F1 with lang='en', rescale_with_baseline=True.
+    """BERTScore precision/recall/F1 with lang='en' (Curie cell 20 verbatim).
 
-    Returns the raw rescaled values. F1 is roughly in [-1, 1] under rescaling:
-    identity matches stay near 1.0, random English vs scientific text rescales
-    near 0, and below-baseline outputs go negative (empirically ~-0.30 for
-    `'lorem ipsum xyz'` vs scientific GT, ~-0.48 for token-repetition hacks).
-    Negative values are preserved here so the weight-0 aux observability path
-    (_aux_bert_f1) can log the full distribution including the negative tail —
-    Stage 5 W&B needs that signal to distinguish "rollouts crossing baseline by
-    -0.05" from "rollouts crashing through to -0.45".
-    Consumers that need inputs in [0, 1] (freeform_geometric) must clamp at the
-    consumption site, not here.
+    F1 is in [0, 1] with a high English-pair floor (~0.85 for any English text
+    against scientific GT). The geometric coupling in `freeform_geometric` and
+    its rubric clamp tolerate any value in that range; with raw BERTScore the
+    clamp is a no-op and the geometric mean stays well-defined for every
+    rollout, restoring DAPO advantage variance at step 0 of GRPO training.
     """
     precision, recall, F1 = _get_bert_scorer().score([pred], [ref])
     return {
