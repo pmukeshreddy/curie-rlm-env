@@ -161,10 +161,10 @@ async def amain() -> int:
 
         print("\n\n=== AGGREGATE ===", flush=True)
         n_total = len(results)
-        n_err = sum(1 for r in results if "error" in r)
+        n_err = sum(1 for r in results if r.get("error"))
         n_completed = sum(1 for r in results if r.get("is_completed"))
         n_answer_ready = sum(1 for r in results if r.get("stop_condition") == "answer_ready")
-        rewards = [r.get("reward", 0.0) for r in results if "error" not in r]
+        rewards = [r.get("reward", 0.0) for r in results if not r.get("error")]
         n_nonzero_reward = sum(1 for x in rewards if x and x != 0.0)
         n_zero_reward = sum(1 for x in rewards if x == 0.0)
         reward_min = min(rewards) if rewards else 0.0
@@ -181,7 +181,7 @@ async def amain() -> int:
 
         stops: dict[str, int] = {}
         for r in results:
-            key = r.get("stop_condition") if "error" not in r else f"ERROR:{r['error'][:60]}"
+            key = r.get("stop_condition") if not r.get("error") else f"ERROR:{str(r['error'])[:60]}"
             stops[str(key)] = stops.get(str(key), 0) + 1
         print("\nStop conditions:", flush=True)
         for cond, count in sorted(stops.items(), key=lambda kv: -kv[1]):
@@ -189,7 +189,7 @@ async def amain() -> int:
 
         print("\nPer-rollout breakdown:", flush=True)
         for r in results:
-            if "error" in r:
+            if r.get("error"):
                 print(f"  R{r['idx']:>2}: ERROR {r['error']}", flush=True)
             else:
                 print(
