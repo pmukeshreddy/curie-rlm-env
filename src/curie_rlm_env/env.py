@@ -190,19 +190,6 @@ class CurieRLMEnv(RLMEnv):
             )
         self._executor.sandbox_client.teardown(wait=False)
         self._executor = LocalDockerRLMExecutor(self)
-        # Per-rollout answer cache — bypass for the state-propagation gap where
-        # mutations made inside submit_answer (which the verifiers tool dispatch
-        # routes through `tool_func(**tool_args)` after our update_tool_args
-        # injects state) don't reach the @vf.stop predicate `answer_schema_valid`
-        # despite both running in the same env-worker process. Rollouts spun
-        # forever because `state["final_answer"]` set in submit_answer was
-        # invisible to answer_schema_valid → has_final_answer=False forever →
-        # buffer never accumulates batches → trainer step 0 forever.
-        # Fix: keep the canonical answer here, keyed on rollout_id (the same
-        # key RLMEnv uses for self.active_rollouts). answer_schema_valid falls
-        # back to this dict when state is empty. Cleaned up on rollout end.
-        self._curie_rollout_answers: dict[str, str] = {}
-        self._curie_rollout_submit_calls: dict[str, int] = {}
         self.add_tool(self.submit_answer, args_to_skip=["state"])
         _dbg(
             f"CurieRLMEnv ready task_id={self.task_id} continual_phase={self.continual_phase} "
@@ -253,35 +240,10 @@ class CurieRLMEnv(RLMEnv):
 
     async def submit_answer(self, content: str, state: State) -> str:
         """Submit the final CURIE answer through RLMEnv's Python worker."""
-        rollout_id = state.get("rollout_id")
-        # ROOT-CAUSE PROBE: log id(state) plus its membership in active_rollouts
-        # so we can confirm whether submit_answer's state IS the same dict ref
-        # as the one stored in self.active_rollouts (which is what @vf.stop
-        # predicates also see). If id() matches → mutations should propagate
-        # and the bug is elsewhere. If id() differs → state IS being copied
-        # somewhere between rollout setup and tool dispatch, and we go fix THAT.
-        active_state = (
-            self.active_rollouts.get(rollout_id, {}).get("state")
-            if isinstance(rollout_id, str) else None
-        )
-        _dbg(
-            f"PROBE submit_answer rollout_id={rollout_id!r} "
-            f"id_state={id(state)} "
-            f"id_active_rollouts_state={id(active_state) if active_state is not None else 'None'} "
-            f"same_object={state is active_state} "
-            f"final_answer_in_active={'final_answer' in (active_state or {})}"
-        )
-        # Dual-write the call counter: state is best-effort (subject to the
-        # state-propagation gap), instance dict is authoritative.
         state["_curie_submit_answer_calls"] = state.get("_curie_submit_answer_calls", 0) + 1
-        if isinstance(rollout_id, str):
-            self._curie_rollout_submit_calls[rollout_id] = (
-                self._curie_rollout_submit_calls.get(rollout_id, 0) + 1
-            )
         _dbg(
-            f"submit_answer ENTRY rollout_id={rollout_id!r} "
+            f"submit_answer ENTRY rollout_id={state.get('rollout_id')!r} "
             f"call_n={state['_curie_submit_answer_calls']} "
-            f"call_n_authoritative={self._curie_rollout_submit_calls.get(rollout_id, 0) if isinstance(rollout_id, str) else 'n/a'} "
             f"content_type={type(content).__name__} "
             f"content_len={len(content) if isinstance(content, str) else 'n/a'} "
             f"content_head={(content[:120] if isinstance(content, str) else repr(content)[:120])!r}"
@@ -316,60 +278,15 @@ class CurieRLMEnv(RLMEnv):
             raise RuntimeError(
                 "submit_answer failed: RLM worker did not return matching ready answer"
             )
-        # Dual-write the answer: state for the upstream code path that DOES
-        # propagate (e.g. RLMEnv.env_response checking `if "final_answer" in state`
-        # at rlm_env.py:4206), instance dict for the @vf.stop predicate path
-        # that empirically does NOT see state mutations from tool-call dispatch.
         state["final_answer"] = answer["content"]
-        if isinstance(rollout_id, str):
-            self._curie_rollout_answers[rollout_id] = answer["content"]
         _dbg(
-            f"submit_answer SUCCESS rollout_id={rollout_id!r} "
-            f"final_answer_len={len(state['final_answer'])} "
-            f"instance_dict_size={len(self._curie_rollout_answers)}"
+            f"submit_answer SUCCESS rollout_id={state.get('rollout_id')!r} "
+            f"final_answer_len={len(state['final_answer'])}"
         )
         return "Final answer submitted."
 
     @vf.stop
     async def answer_schema_valid(self, state: State) -> bool:
-        # State-propagation repair: empirically, when submit_answer (or the
-        # parent's call_python_repl path that sets state["final_answer"] at
-        # rlm_env.py:3805) runs in tool dispatch, the mutation is invisible
-        # here. The state object passed to @vf.stop predicates is somehow not
-        # the same dict the tool-dispatch path mutated.
-        #
-        # Two parallel repair sources, in order of preference:
-        #   1. self.active_rollouts[rollout_id]["state"]["final_answer"] — the
-        #      framework's own per-rollout state registry (RLMEnv populates it
-        #      at _setup_interception_and_register, rlm_env.py:3455). This is
-        #      the same canonical state the sandbox-callback path uses
-        #      (state_ref = context.get("state") at rlm_env.py:3253), so
-        #      framework writes via call_python_repl land there reliably.
-        #   2. self._curie_rollout_answers[rollout_id] — our own dual-write
-        #      from submit_answer; covers the case where the framework
-        #      registry write also gets lost.
-        rollout_id = state.get("rollout_id")
-        if isinstance(rollout_id, str) and "final_answer" not in state:
-            active_state = self.active_rollouts.get(rollout_id, {}).get("state")
-            if (
-                isinstance(active_state, dict)
-                and active_state is not state
-                and "final_answer" in active_state
-            ):
-                state["final_answer"] = active_state["final_answer"]
-                _dbg(
-                    f"answer_schema_valid REPAIRED via active_rollouts "
-                    f"rollout_id={rollout_id!r} "
-                    f"len={len(state['final_answer'])}"
-                )
-            elif rollout_id in self._curie_rollout_answers:
-                state["final_answer"] = self._curie_rollout_answers[rollout_id]
-                _dbg(
-                    f"answer_schema_valid REPAIRED via _curie_rollout_answers "
-                    f"rollout_id={rollout_id!r} "
-                    f"len={len(state['final_answer'])}"
-                )
-
         has_final = "final_answer" in state
         ans = state.get("final_answer")
         ans_repr = (ans[:120] + "…") if isinstance(ans, str) and len(ans) > 120 else repr(ans)
@@ -412,29 +329,10 @@ class CurieRLMEnv(RLMEnv):
         # root_llm_* and *_call_count fields tell us whether the root model and tools
         # ran at all. `error` is the upstream rollout error (if any). submit_answer_calls
         # is the CurieRLMEnv-only counter — proves whether the model actually invoked the tool.
-        # ROOT-CAUSE PROBE: pair with the id() probe in submit_answer so we can
-        # tell whether the state dict here is the same object as the one tools
-        # mutate. If id() matches across both probes for the same rollout AND
-        # final_answer is missing here AFTER submit_answer SUCCESS-logged for
-        # that rollout, the bug is NOT state propagation — something is reading
-        # a stale snapshot. If id() differs, state IS being copied.
-        _probe_active_state = (
-            self.active_rollouts.get(rollout_id, {}).get("state")
-            if isinstance(rollout_id, str) else None
-        )
-        _dbg(
-            f"PROBE answer_schema_valid rollout_id={rollout_id!r} "
-            f"id_state={id(state)} "
-            f"id_active_rollouts_state={id(_probe_active_state) if _probe_active_state is not None else 'None'} "
-            f"same_object={state is _probe_active_state} "
-            f"final_answer_in_active={'final_answer' in (_probe_active_state or {})} "
-            f"final_answer_in_passed_state={'final_answer' in state}"
-        )
         _dbg(
             f"answer_schema_valid rollout_id={state.get('rollout_id')!r} "
             f"has_final_answer={has_final} answer={ans_repr} "
             f"submit_answer_calls={state.get('_curie_submit_answer_calls', 0)} "
-            f"submit_answer_calls_authoritative={self._curie_rollout_submit_calls.get(rollout_id, 0) if isinstance(rollout_id, str) else 'n/a'} "
             f"tool_map_keys={sorted(self.tool_map.keys())} "
             f"trajectory_turns={len(traj)} "
             f"root_llm_turns={state.get('root_llm_turns')!r} "
@@ -459,22 +357,6 @@ class CurieRLMEnv(RLMEnv):
             _dbg(f"answer_schema_valid REJECT rollout_id={state.get('rollout_id')!r} reason={exc}")
             raise
         return True
-
-    @vf.cleanup
-    async def cleanup_curie_rollout_answers(self, state: State) -> None:
-        """Drop per-rollout answer cache when the rollout finishes.
-
-        Pairs with the dual-write in submit_answer / repair-read in
-        answer_schema_valid. Without this, _curie_rollout_answers would grow
-        unbounded over a long training run (one entry per rollout, never
-        evicted). Runs alongside RLMEnv.cleanup_rlm_state via the @vf.cleanup
-        decorator — order between the two doesn't matter because they touch
-        disjoint dicts (active_rollouts vs _curie_rollout_answers).
-        """
-        rollout_id = state.get("rollout_id")
-        if isinstance(rollout_id, str):
-            self._curie_rollout_answers.pop(rollout_id, None)
-            self._curie_rollout_submit_calls.pop(rollout_id, None)
 
 
 def load_task_environment(task_id: str, split: str = "test") -> CurieRLMEnv:
