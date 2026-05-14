@@ -104,16 +104,18 @@ async def run_one(client: ZMQEnvClient, example: dict, idx: int) -> dict[str, An
                 "extra_body": {"tool_choice": "required"},
             },
         )
-        state = getattr(output, "state", {}) or {}
-        if not isinstance(state, dict):
-            state = {}
+        # RolloutOutput(dict) — top-level fields only. Custom state keys like
+        # `_curie_submit_answer_calls` and `final_answer` are NOT here unless
+        # state_columns explicitly named them. The orchestrator-relevant signals
+        # are these standard fields:
         return {
             "idx": idx,
-            "rollout_id": state.get("rollout_id"),
-            "stop_condition": state.get("stop_condition"),
-            "final_answer_in_state": "final_answer" in state,
-            "_curie_submit_answer_calls": state.get("_curie_submit_answer_calls", 0),
-            "root_llm_turns": state.get("root_llm_turns", 0),
+            "is_completed": output.get("is_completed", False),
+            "stop_condition": output.get("stop_condition"),
+            "reward": output.get("reward", 0.0),
+            "answer_present": bool(output.get("answer")),
+            "answer_len": len(output.get("answer") or ""),
+            "error": output.get("error"),
         }
     except Exception as exc:
         return {"idx": idx, "error": f"{type(exc).__name__}: {exc}"}
@@ -160,14 +162,22 @@ async def amain() -> int:
         print("\n\n=== AGGREGATE ===", flush=True)
         n_total = len(results)
         n_err = sum(1 for r in results if "error" in r)
-        n_submit = sum(1 for r in results if r.get("_curie_submit_answer_calls", 0) > 0)
-        n_final = sum(1 for r in results if r.get("final_answer_in_state"))
+        n_completed = sum(1 for r in results if r.get("is_completed"))
         n_answer_ready = sum(1 for r in results if r.get("stop_condition") == "answer_ready")
+        rewards = [r.get("reward", 0.0) for r in results if "error" not in r]
+        n_nonzero_reward = sum(1 for x in rewards if x and x != 0.0)
+        n_zero_reward = sum(1 for x in rewards if x == 0.0)
+        reward_min = min(rewards) if rewards else 0.0
+        reward_max = max(rewards) if rewards else 0.0
+        reward_mean = (sum(rewards) / len(rewards)) if rewards else 0.0
+
         print(f"  rollouts:                 {n_total}", flush=True)
         print(f"  errored:                  {n_err}", flush=True)
-        print(f"  submit_answer called:     {n_submit}", flush=True)
-        print(f"  final_answer in state:    {n_final}", flush=True)
-        print(f"  stopped via answer_ready: {n_answer_ready}", flush=True)
+        print(f"  is_completed=True:        {n_completed}", flush=True)
+        print(f"  stop=answer_ready:        {n_answer_ready}", flush=True)
+        print(f"  reward != 0.0:            {n_nonzero_reward}", flush=True)
+        print(f"  reward == 0.0:            {n_zero_reward}", flush=True)
+        print(f"  reward min/mean/max:      {reward_min:.4f} / {reward_mean:.4f} / {reward_max:.4f}", flush=True)
 
         stops: dict[str, int] = {}
         for r in results:
@@ -183,38 +193,45 @@ async def amain() -> int:
                 print(f"  R{r['idx']:>2}: ERROR {r['error']}", flush=True)
             else:
                 print(
-                    f"  R{r['idx']:>2}: rollout_id={r['rollout_id']!r} "
+                    f"  R{r['idx']:>2}: "
+                    f"is_completed={r['is_completed']} "
                     f"stop={r['stop_condition']!r} "
-                    f"submit={r['_curie_submit_answer_calls']} "
-                    f"final={r['final_answer_in_state']} "
-                    f"turns={r['root_llm_turns']}",
+                    f"reward={r['reward']:.4f} "
+                    f"gt_answer_present={r['answer_present']} "
+                    f"gt_answer_len={r['answer_len']}",
                     flush=True,
                 )
 
         print("\n--- VERDICT ---", flush=True)
-        if n_submit > 0 and n_final < n_submit:
-            print("BUG REPRODUCED across the env_worker ZMQ subprocess boundary:", flush=True)
-            print(f"  {n_submit} rollouts called submit_answer; only {n_final} ended with final_answer in state.", flush=True)
-            print("  → Root cause site: the env_worker / ZMQ pipeline.", flush=True)
-            print(f"  → Inspect {LOG_DIR}/env_worker_0.log + this script's stderr for", flush=True)
-            print("    [CURIE-DEBUG] id_state divergence per rollout_id.", flush=True)
+        if n_completed == 0:
+            print("BROKEN: no rollout ever set is_completed=True.", flush=True)
+            print(f"  → 0/{n_total} rollouts terminated via any @vf.stop predicate.", flush=True)
+            print("  → Either rollouts hit max_turns silently, or RolloutOutput.is_completed", flush=True)
+            print("    isn't being set by state_to_output despite the worker logs showing", flush=True)
+            print("    is_completed=True. Inspect worker stderr to confirm.", flush=True)
             verdict_code = 1
-        elif n_submit == 0:
-            print("INCONCLUSIVE: no rollout called submit_answer.", flush=True)
-            print("  → tool_choice='required' is set; check vLLM honored it and", flush=True)
-            print("    that prompts produced enough turns for the model to act.", flush=True)
+        elif n_completed > 0 and n_answer_ready == 0:
+            print(f"PARTIAL: {n_completed}/{n_total} completed, but ZERO via answer_ready.", flush=True)
+            print("  → Rollouts terminate via other stops (no_tools_called, max_turns, error).", flush=True)
+            print("    submit_answer never reached/succeeded. Issue B may be regressing or", flush=True)
+            print("    the model is not invoking submit_answer in time.", flush=True)
             verdict_code = 2
-        elif n_final == n_submit:
-            print(f"HEALTHY at env_worker ZMQ subprocess boundary: {n_final}/{n_submit} terminated correctly.", flush=True)
-            print("  → The verifiers env_worker subprocess is NOT the cause of Issue A.", flush=True)
-            print("  → Bug requires prime-rl orchestrator's specific batching:", flush=True)
-            print("    run_group, online_difficulty_filtering, max_async_level=2,", flush=True)
-            print("    DAPO buffer, or trainer-side state filtering.", flush=True)
-            verdict_code = 0
-        else:
-            print(f"PARTIAL: {n_final}/{n_submit} terminated correctly.", flush=True)
-            print("  → Intermittent under ZMQ — re-run with higher REPRO_NUM_ROLLOUTS.", flush=True)
+        elif n_completed > 0 and n_zero_reward == n_completed:
+            print(f"BUG REPRODUCED: {n_completed}/{n_total} rollouts terminated, ALL with reward=0.0.", flush=True)
+            print("  → State propagation is healthy; rubric is returning zero on every rollout.", flush=True)
+            print("  → DAPO online_difficulty_filtering would reject every group → trainer stuck.", flush=True)
+            print("  → Next: dump state['final_answer'] vs state['answer'] (ground truth) for one", flush=True)
+            print("    rollout from worker logs to see WHY rubric returns 0.", flush=True)
             verdict_code = 3
+        else:
+            print(f"HEALTHY at env_worker ZMQ subprocess boundary:", flush=True)
+            print(f"  {n_answer_ready}/{n_total} stopped via answer_ready, {n_nonzero_reward} non-zero rewards", flush=True)
+            print(f"  reward range [{reward_min:.4f}, {reward_max:.4f}], mean {reward_mean:.4f}", flush=True)
+            print("  → The verifiers env_worker subprocess returns useful RolloutOutput.", flush=True)
+            print("  → If production trainer is still stuck at step 0, the issue is in", flush=True)
+            print("    prime-rl's filter/buffer (online_difficulty_filtering, zero_advantage,", flush=True)
+            print("    max_async_level batching) — not in env or env_worker.", flush=True)
+            verdict_code = 0
 
     finally:
         print("\nShutting down env_server subprocess ...", flush=True)
