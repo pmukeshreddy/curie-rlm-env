@@ -51,6 +51,48 @@ _ALL_TASKS = (
 )
 
 
+# Free-form GT field-extraction helpers. The dataset's `answer` for a free-form
+# task is `json.dumps(entry["ground_truth"])` (datasets.py:_row_from_split_entry),
+# and the ground_truth is a structured dict/list — `code` for DFT-C, Hamiltonian
+# + Other_info for HFE, list of step dicts for HFD, list of catalog dicts for
+# QECC_65, paper metadata + notes for GEO. Comparing prose summaries against
+# `json.dumps(...)` of those structures passes JSON syntax (`{`, `}`, `"key":`)
+# and identifier metadata (record_id, arxiv_id, paper_link) into ROUGE/BERT,
+# both of which are noise. Extract content-only text instead.
+_IDENTIFIER_KEY_NAMES = frozenset({"id", "url", "doi", "paper_link"})
+_IDENTIFIER_KEY_SUFFIXES = ("_id",)
+
+
+def _is_identifier_key(key) -> bool:
+    """True if a GT key looks like metadata (record_id, arxiv_id, paper_link,
+    etc.) rather than content. Used by _freeform_reference."""
+    if not isinstance(key, str):
+        return False
+    k = key.lower()
+    return k in _IDENTIFIER_KEY_NAMES or any(k.endswith(s) for s in _IDENTIFIER_KEY_SUFFIXES)
+
+
+def _collect_content_strings(obj) -> list[str]:
+    """Recursively collect string-typed values from a parsed GT (dict/list),
+    skipping identifier-like keys. Order is the GT's natural traversal order
+    so the joined reference text reads coherently."""
+    if isinstance(obj, str):
+        return [obj] if obj.strip() else []
+    if isinstance(obj, dict):
+        out: list[str] = []
+        for k, v in obj.items():
+            if _is_identifier_key(k):
+                continue
+            out.extend(_collect_content_strings(v))
+        return out
+    if isinstance(obj, list):
+        out = []
+        for item in obj:
+            out.extend(_collect_content_strings(item))
+        return out
+    return []
+
+
 class CurieRubric(vf.Rubric):
     """Per-task reward dispatcher. See module docstring for full mapping."""
 
@@ -113,6 +155,34 @@ class CurieRubric(vf.Rubric):
             raise ValueError(
                 f"CurieRubric[{task_id}]: malformed reference JSON: {exc}"
             ) from exc
+
+    @staticmethod
+    def _freeform_reference(answer_string: str, task_id: str) -> str:
+        """Extract content-only reference text from a json-encoded free-form GT.
+
+        DFT-C uses the TASK_MAP-backed `code` field as the canonical answer
+        (per `datasets.TASK_MAP[DFT-C] = ("dft", "code")`). Other free-form
+        tasks (HFE, HFD, QECC_65, GEO) use a generic recursive collector that
+        pulls every string value from the GT object while skipping
+        identifier-like keys (record_id, arxiv_id, paper_link, etc.).
+
+        Falls back to the original `answer_string` when:
+          - the GT can't be parsed as JSON (treat as raw prose), or
+          - extraction yields nothing (e.g. a record with only metadata).
+        These fallbacks preserve the pre-fix behavior in unexpected shapes
+        instead of returning an empty reference (which would zero the reward).
+        """
+        try:
+            gt = json5.loads(answer_string)
+        except (ValueError, TypeError):
+            return answer_string
+        if task_id == "DFT-C":
+            if isinstance(gt, dict) and isinstance(gt.get("code"), str) and gt["code"].strip():
+                return gt["code"]
+        parts = _collect_content_strings(gt)
+        if not parts:
+            return answer_string
+        return "\n".join(parts)
 
     # ------- Headline reward funcs -----------------------------------------
     # Strict semantics:
@@ -225,13 +295,19 @@ class CurieRubric(vf.Rubric):
         pred_text = self._extract_pred(completion, state)
         if not pred_text.strip():
             return 0.0
-        rouge_norm = rouge_l(pred_text, answer)["rougeLsum"] / 100.0
+        # Per-task content extraction. The dataset hands us
+        # `json.dumps(structured_gt)`; passing that directly to ROUGE/BERT mixes
+        # JSON syntax (`{`, `}`, `"key":`) and identifier metadata (record_id,
+        # arxiv_id, paper_link) into the comparison. Strip both via
+        # _freeform_reference before scoring.
+        ref_text = self._freeform_reference(answer, task_id)
+        rouge_norm = rouge_l(pred_text, ref_text)["rougeLsum"] / 100.0
         # bert_score_fn returns raw BERTScore F1 (Curie cell 20 verbatim, no
         # baseline rescale) — strictly in [0, 1], with a high English floor so
         # the geometric coupling stays well-defined for every rollout. The clamp
         # below is a defensive bound (max(0, raw) is a no-op on the raw scale,
         # but kept as explicit input-domain enforcement for freeform_geometric).
-        bert_f1_raw = bert_score_fn(pred_text, answer)["bert_f1"]
+        bert_f1_raw = bert_score_fn(pred_text, ref_text)["bert_f1"]
         bert_f1_for_geometric = max(0.0, bert_f1_raw)
         return float(freeform_geometric(rouge_norm, bert_f1_for_geometric))
 
@@ -241,17 +317,34 @@ class CurieRubric(vf.Rubric):
         pred_text = self._extract_pred(completion, state)
         if not pred_text.strip() or not answer:
             return 0.0
-        return float(rouge_l(pred_text, answer)["rougeLsum"])
+        # Match the headline reward path: strip JSON syntax + identifier
+        # metadata from free-form references before scoring. Non-free-form
+        # tasks keep the json-encoded answer (LLMSim/IoU/IDr have their own
+        # structured parsers; the aux metric here just observes for W&B).
+        task_id = self._task_id(info, task)
+        ref_text = (
+            self._freeform_reference(answer, task_id)
+            if task_id in _FREEFORM_TASKS
+            else answer
+        )
+        return float(rouge_l(pred_text, ref_text)["rougeLsum"])
 
     async def _aux_bert_f1(self, prompt, completion, answer, state, task, info, **kwargs) -> float:
         # Logs raw BERTScore F1 (Curie cell 20 verbatim — no baseline rescale).
         # F1 is in [0, 1] with a high English floor (~0.85). Used for Stage 5
         # W&B observability across all 10 tasks; the headline reward consumes
-        # the same scorer in _freeform_geometric_reward.
+        # the same scorer in _freeform_geometric_reward, with the same per-task
+        # reference extraction so headline and aux stay numerically consistent.
         pred_text = self._extract_pred(completion, state)
         if not pred_text.strip() or not answer:
             return 0.0
-        return float(bert_score_fn(pred_text, answer)["bert_f1"])
+        task_id = self._task_id(info, task)
+        ref_text = (
+            self._freeform_reference(answer, task_id)
+            if task_id in _FREEFORM_TASKS
+            else answer
+        )
+        return float(bert_score_fn(pred_text, ref_text)["bert_f1"])
 
     async def _aux_diou_raw(self, prompt, completion, answer, state, task, info, **kwargs) -> float:
         # Logs raw DIoU (can be negative for non-overlapping bboxes). The
