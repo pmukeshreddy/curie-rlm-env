@@ -5,22 +5,24 @@ locked decisions:
 - DFT-S, DFT-P, MPVE: LLMSim × 0.7  (max 0.7)
 - BIOGR: IoU × 1.0
 - PDB: ID_r × 1.0  (FASTA `>` path only; code-exec branch dropped)
-- DFT-C, HFE, HFD, QECC_65, GEO: (ROUGE-Lsum/100)^0.6 * BERT-F1^0.4 × 1.0  (max 1.0)
-  where BERT-F1 is the Curie cell 20 default (raw, no baseline rescale).
+- DFT-C, HFE, HFD, QECC_65, GEO: (ROUGE-Lsum/100)^0.6 × 1.0  (max 1.0)
 
 Auxiliary metrics (weight 0, applied to ALL 10 tasks for observability via
-RubricGroup aggregate): rouge_lsum, bert_f1 (raw F1 — same scorer).
+RubricGroup aggregate): rouge_lsum, bert_f1 (raw F1, kept for observability so
+we can detect if/when BERT starts varying as the policy produces GT-shaped
+outputs).
 
-Stage 5 update (CLAUDE.md guard #7): free-form scoring is a geometric coupling,
-not an additive split — zero on either component collapses the reward, closing
-the length-grift pathway. BERT-F1 uses Curie cell 20 verbatim (raw, no
-baseline rescale); the previous Stage 5 deviation (rescale_with_baseline=True)
-was reverted after the Stage 3b ZMQ harness on Phase 1 data showed that the
-rescaled F1 went uniformly negative for baseline Qwen3-8B rollouts and
-collapsed every rollout's reward to 0 (DAPO online_difficulty_filtering then
-rejected every group → trainer stuck at step 0). See CLAUDE.md "Documented
-Deviations from Curie release" entry for the W&B evidence and the rule
-("defenses are added with W&B evidence in Stage 5+, never preemptively").
+BERT removed from free-form headline reward post-Stage 3b harness evidence:
+16/16 baseline Qwen3-8B rollouts on Phase 1 data produced bert_f1 in
+[0.72, 0.80] — near-constant because the geometric-mean's bert factor
+reduces to a constant scaling that DAPO z-score normalization cancels. The
+metric was contributing zero gradient signal. Keeping it in the headline was
+cosmetic; removing it makes the formula honest about what's actually computing
+reward (rouge_lsum with stopword filtering). The 0.6 exponent is retained
+because it amplifies small rouge gains at cold-start, expanding DAPO's
+advantage dynamic range. See CLAUDE.md "Documented Deviations from Curie
+release" for the full rationale and CLAUDE.md L67 (defenses removed with W&B
+evidence is the same principle as defenses added).
 """
 from __future__ import annotations
 
@@ -30,7 +32,14 @@ from typing import Any, Callable, Optional
 import json5
 import verifiers as vf
 
-from .scorers import bert_score_fn, diou, freeform_geometric, id_r, llm_sim, rouge_l
+from .scorers import (
+    FREEFORM_ROUGE_EXPONENT,
+    bert_score_fn,
+    diou,
+    id_r,
+    llm_sim,
+    rouge_l,
+)
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -284,17 +293,20 @@ class CurieRubric(vf.Rubric):
             return 0.0
         # Curie-verbatim preprocessing (cell 28 else-branch): strip 3
         # identifier fields from the json-dumped GT before passing to
-        # ROUGE/BERT. Matches how Curie scores all free-form tasks.
+        # ROUGE. Matches how Curie's scorer ingests the reference.
         ref_text = self._freeform_reference(answer)
         rouge_norm = rouge_l(pred_text, ref_text)["rougeLsum"] / 100.0
-        # bert_score_fn returns raw BERTScore F1 (Curie cell 20 verbatim, no
-        # baseline rescale) — strictly in [0, 1], with a high English floor so
-        # the geometric coupling stays well-defined for every rollout. The clamp
-        # below is a defensive bound (max(0, raw) is a no-op on the raw scale,
-        # but kept as explicit input-domain enforcement for freeform_geometric).
-        bert_f1_raw = bert_score_fn(pred_text, ref_text)["bert_f1"]
-        bert_f1_for_geometric = max(0.0, bert_f1_raw)
-        return float(freeform_geometric(rouge_norm, bert_f1_for_geometric))
+        # Reward = (ROUGE_Lsum/100)^0.6. BERT removed from headline post-Stage
+        # 3b harness evidence: it clustered at near-constant 0.72-0.80 across
+        # all 16 rollouts, contributing zero gradient signal because constant
+        # factors cancel under DAPO z-score advantage normalization. The 0.6
+        # exponent is retained — it amplifies small rouge gains at cold-start,
+        # which is exactly what DAPO needs for advantage dynamic range when
+        # the policy is producing low-overlap outputs. See module docstring
+        # and CLAUDE.md "Documented Deviations from Curie release" for the
+        # full rationale. _aux_bert_f1 still logs BERT as weight-0
+        # observability so we can detect if/when it starts varying.
+        return float(rouge_norm ** FREEFORM_ROUGE_EXPONENT)
 
     # ------- Auxiliary observability metrics (weight 0, all tasks) ---------
 

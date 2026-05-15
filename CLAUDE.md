@@ -86,19 +86,26 @@ Optional: pass@k (threshold-based, e.g. F1>0.5 for retrieval, ROUGE-L>0.3 for fr
    - Programmatic (IoU, ID_r, ROUGE-L) → weight 1.0
    - LLMSim → weight 0.7
    - BERTScore → weight 0.5
-7. Free-form length-grift coupling (DFT-C, HFE, HFD, QECC_65, GEO): geometric mean
-   (ROUGE_Lsum/100)^0.6 * BERT_F1^0.4 replaces additive 0.5·ROUGE_L + 0.5·BERT_F1.
-   BERT_F1 is the Curie cell 20 default (raw, no baseline rescale) — the earlier
-   `rescale_with_baseline=True` deviation was reverted with W&B evidence (see
-   the BERTScore entry under "Documented Deviations from Curie release"). The
-   `max(0.0, raw)` clamp at the consumption site in `_freeform_geometric_reward`
-   is now a defensive no-op on raw BERT (which lives in [0, 1]) but is kept as
-   explicit input-domain enforcement for `freeform_geometric`. ROUGE-L is
-   computed with English stopword filtering (custom tokenizer in scorers.py)
-   — drops the content-free baseline from ~13/100 to ~0/100. Zero on either
-   component returns 0 (signal must propagate); out-of-[0,1] inputs raise.
-   Reward func wired at weight=1.0; max free-form contribution remains 1.0 (parity with
-   programmatic tasks). freeform_weight in safeguards.yaml is now a legacy field.
+7. Free-form reward (DFT-C, HFE, HFD, QECC_65, GEO): (ROUGE_Lsum/100)^0.6 × 1.0.
+   The original design was a geometric coupling (ROUGE_Lsum/100)^0.6 * BERT_F1^0.4,
+   chosen to give a length-grift floor via "zero on either component → zero reward".
+   Stage 3b harness evidence (16/16 baseline Qwen3-8B rollouts on Phase 1 data)
+   showed BERT_F1 clustering at [0.72, 0.80] across every rollout — near-constant
+   because the embedding-space mismatch between prose summaries and structured
+   technical content (code/LaTeX/dicts) is structural to roberta-large, not noise.
+   A constant factor cancels under DAPO z-score advantage normalization, so BERT
+   was contributing zero gradient signal. Removed from headline reward to keep
+   the formula honest about what's actually computing the gradient: ROUGE_Lsum
+   with English stopword filtering. The 0.6 exponent is retained — it amplifies
+   small rouge values at cold-start, expanding DAPO's advantage dynamic range
+   when the policy is producing low-overlap outputs. `_aux_bert_f1` still logs
+   raw BERT as a weight-0 observability metric so we can detect if/when BERT
+   starts varying (e.g. once the policy learns to produce GT-shaped outputs).
+   ROUGE-L is computed with English stopword filtering (custom tokenizer in
+   `scorers.py`) — drops the content-free baseline from ~13/100 to ~0/100.
+   Reward func wired at weight=1.0; max free-form contribution remains 1.0
+   (parity with programmatic tasks). `freeform_weight` in safeguards.yaml is
+   a legacy field.
 
 ## Sub-Agent Policy (Automatic)
 For any task with 2+ independent parts, act as orchestrator and spawn minimum single-responsibility sub-agents in parallel: brainstormer, reviewer, tester.
