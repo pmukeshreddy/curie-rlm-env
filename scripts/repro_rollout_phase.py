@@ -109,7 +109,16 @@ async def run_one(
         input=example,
         client=client_cfg,
         model=model,
-        sampling_args={"temperature": 1.0, "max_completion_tokens": 4096},
+        sampling_args={
+            "temperature": 1.0,
+            "max_completion_tokens": 4096,
+            # Issue B fix: vLLM constrained decoding so every assistant turn
+            # produces a real `tool_calls` object instead of plain-text
+            # `submit_answer(content="...")` that the env can't see. Matches
+            # configs/curie_grpo_continual_phase1.toml:62 production setting
+            # and scripts/repro_zmq_subprocess.py:104.
+            "extra_body": {"tool_choice": "required"},
+        },
     )
 
     return {
