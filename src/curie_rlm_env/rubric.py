@@ -157,32 +157,124 @@ class CurieRubric(vf.Rubric):
             ) from exc
 
     @staticmethod
-    def _freeform_reference(answer_string: str, task_id: str) -> str:
+    def _freeform_reference(answer_string: str, task_id: str, info=None) -> str:
         """Extract content-only reference text from a json-encoded free-form GT.
 
-        DFT-C uses the TASK_MAP-backed `code` field as the canonical answer
-        (per `datasets.TASK_MAP[DFT-C] = ("dft", "code")`). Other free-form
-        tasks (HFE, HFD, QECC_65, GEO) use a generic recursive collector that
-        pulls every string value from the GT object while skipping
-        identifier-like keys (record_id, arxiv_id, paper_link, etc.).
+        Per-task field whitelists, NOT a generic "concatenate every string
+        value" collector — that approach treats `Hamiltonian` (LaTeX) the same
+        as `Score` (numeric string) for HFE and concatenates equation strings
+        with step prose for HFD, both of which inject scoring noise. Each task
+        names exactly the fields whose content the model is meant to match.
 
-        Falls back to the original `answer_string` when:
-          - the GT can't be parsed as JSON (treat as raw prose), or
-          - extraction yields nothing (e.g. a record with only metadata).
-        These fallbacks preserve the pre-fix behavior in unexpected shapes
-        instead of returning an empty reference (which would zero the reward).
+        Field choices come from the GT shapes observed in
+        scripts/investigate_gt_format.py and the file structure of
+        data/curie/data/data/{folder}/ground_truth/. Where the choice is not
+        unambiguously implied by TASK_MAP or the field semantics, the comment
+        flags it as an ASSUMPTION so a future audit against
+        data/curie/colabs/curie_run_eval.ipynb cell 30 (the upstream Curie
+        scorer that defines `_FULL_ADDITIONAL_METRICS`) can confirm or
+        correct it.
+
+        Falls back to the original `answer_string` when the GT can't be parsed
+        as JSON or the per-task extraction yields no content. Preserving the
+        pre-fix behavior on an unexpected shape is preferable to returning an
+        empty reference (which would silently zero the reward).
         """
         try:
             gt = json5.loads(answer_string)
         except (ValueError, TypeError):
             return answer_string
+
+        parts: list[str] = []
+
+        # DFT-C: GT is a dict like {code, graph_as_text, no_header_code,
+        # record_id}. The canonical answer field name is carried on the
+        # dataset row as info["dft_field"] (== "code" for DFT-C, set by
+        # datasets.TASK_MAP). Reading info instead of hardcoding "code" keeps
+        # the rubric correct if a future DFT-Cx variant ships with a
+        # different field name. NOT an ASSUMPTION — TASK_MAP is the source
+        # of truth here.
         if task_id == "DFT-C":
-            if isinstance(gt, dict) and isinstance(gt.get("code"), str) and gt["code"].strip():
-                return gt["code"]
-        parts = _collect_content_strings(gt)
-        if not parts:
-            return answer_string
-        return "\n".join(parts)
+            field = info["dft_field"] if isinstance(info, dict) and info.get("dft_field") else "code"
+            if isinstance(gt, dict):
+                v = gt.get(field)
+                if isinstance(v, str) and v.strip():
+                    parts.append(v)
+
+        # HFE: GT is a dict like {Hamiltonian, Other_info, Score, arxiv_id,
+        # record_id}. The model's task is to reproduce the Hamiltonian (LaTeX
+        # equations) plus the prose context. Score is a single numeric
+        # quality string from Curie's curation process (excluded — would
+        # inject token-noise into ROUGE/BERT). arxiv_id and record_id are
+        # identifier metadata (excluded). ASSUMPTION pending cell 30
+        # verification: confirm that Curie's free-form scorer for HFE uses
+        # both Hamiltonian and Other_info as the reference (vs. e.g.
+        # Hamiltonian alone).
+        elif task_id == "HFE":
+            if isinstance(gt, dict):
+                for key in ("Hamiltonian", "Other_info"):
+                    v = gt.get(key)
+                    if isinstance(v, str) and v.strip():
+                        parts.append(v)
+
+        # HFD: GT is a list of step dicts. Per-step prose lives in `task`
+        # (description of what the step does) and `Note` (auxiliary prose).
+        # Other per-step fields like `Step` (the integer step number as a
+        # string) and `Equation` (LaTeX) are excluded — Step is positional
+        # noise, Equation is non-prose that compresses BERT. ASSUMPTION
+        # pending cell 30 verification: confirm Curie's HFD scorer uses
+        # task + Note as the reference (vs. concatenating all step fields).
+        elif task_id == "HFD":
+            if isinstance(gt, list):
+                for step in gt:
+                    if isinstance(step, dict):
+                        for key in ("task", "Note"):
+                            v = step.get(key)
+                            if isinstance(v, str) and v.strip():
+                                parts.append(v)
+
+        # QECC_65: GT is a list of catalog dicts like {code_id, physical,
+        # logical, name, introduced, ...}. The descriptive fields are name,
+        # physical, logical, introduced; code_id is the catalog identifier
+        # (excluded). ASSUMPTION pending cell 30 verification: confirm
+        # Curie's QECC_65 scorer uses these descriptive fields as the
+        # reference (vs. e.g. only `name` or only `physical`).
+        elif task_id == "QECC_65":
+            if isinstance(gt, list):
+                for record in gt:
+                    if isinstance(record, dict):
+                        for key in ("name", "physical", "logical", "introduced"):
+                            v = record.get(key)
+                            if isinstance(v, str) and v.strip():
+                                parts.append(v)
+
+        # GEO: GT is a dict like {notes, paper_title, paper_link, datasets,
+        # record_id}. The prose answer is `notes`. paper_title is included
+        # because BERT/ROUGE benefit from the topic anchor. paper_link and
+        # record_id are identifier metadata (excluded). datasets is excluded
+        # because it's typically a list of dataset identifiers, not prose.
+        # ASSUMPTION pending cell 30 verification: confirm Curie's GEO
+        # scorer uses notes (+/- paper_title) as the reference (vs. notes
+        # alone or all string fields).
+        elif task_id == "GEO":
+            if isinstance(gt, dict):
+                for key in ("notes", "paper_title"):
+                    v = gt.get(key)
+                    if isinstance(v, str) and v.strip():
+                        parts.append(v)
+
+        if parts:
+            return "\n".join(parts)
+
+        # Per-task extraction returned nothing — likely an unexpected GT
+        # shape (e.g. an upstream schema change). Fall back to the generic
+        # content collector before giving up entirely; if that also returns
+        # nothing, surface the original answer_string. Both layers preserve
+        # behavior on unknown shapes instead of zeroing the reward.
+        generic = _collect_content_strings(gt)
+        if generic:
+            return "\n".join(generic)
+        return answer_string
 
     # ------- Headline reward funcs -----------------------------------------
     # Strict semantics:
@@ -298,9 +390,11 @@ class CurieRubric(vf.Rubric):
         # Per-task content extraction. The dataset hands us
         # `json.dumps(structured_gt)`; passing that directly to ROUGE/BERT mixes
         # JSON syntax (`{`, `}`, `"key":`) and identifier metadata (record_id,
-        # arxiv_id, paper_link) into the comparison. Strip both via
-        # _freeform_reference before scoring.
-        ref_text = self._freeform_reference(answer, task_id)
+        # arxiv_id, paper_link) into the comparison. _freeform_reference uses
+        # an explicit per-task field whitelist (see method docstring) and
+        # threads `info` through so DFT-C reads info["dft_field"] from the
+        # dataset row instead of hardcoding the field name.
+        ref_text = self._freeform_reference(answer, task_id, info)
         rouge_norm = rouge_l(pred_text, ref_text)["rougeLsum"] / 100.0
         # bert_score_fn returns raw BERTScore F1 (Curie cell 20 verbatim, no
         # baseline rescale) — strictly in [0, 1], with a high English floor so
@@ -323,7 +417,7 @@ class CurieRubric(vf.Rubric):
         # structured parsers; the aux metric here just observes for W&B).
         task_id = self._task_id(info, task)
         ref_text = (
-            self._freeform_reference(answer, task_id)
+            self._freeform_reference(answer, task_id, info)
             if task_id in _FREEFORM_TASKS
             else answer
         )
@@ -340,7 +434,7 @@ class CurieRubric(vf.Rubric):
             return 0.0
         task_id = self._task_id(info, task)
         ref_text = (
-            self._freeform_reference(answer, task_id)
+            self._freeform_reference(answer, task_id, info)
             if task_id in _FREEFORM_TASKS
             else answer
         )
